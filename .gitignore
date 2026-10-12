@@ -1,0 +1,33 @@
+# ---- 构建产物 ----
+build/
+cmake-build-*/
+
+# ---- 编译中间产物 ----
+*.o
+*.a
+*.so
+*.so.*
+*.out
+*.gch
+*.d
+
+# ---- IDE / 编辑器 ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+compile_commands.json
+
+# ---- 本机密文:绝不提交 ----
+# 数据库口令、LLM API Key 一律走环境变量或本地配置文件
+.env
+*.env
+config.local.*
+secrets.*
+
+# ---- 运行时产物 ----
+*.log
+core
+core.*
+vgcore.*
