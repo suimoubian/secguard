@@ -38,15 +38,19 @@ find_package(OpenSSL REQUIRED)
 # ---------------------------------------------------------------------------
 set(SG_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     ${MYSQLCPPCONN_INCLUDE_DIR})
 
+# 引擎源文件 + 它依赖的日志模块(engine.cpp 里会用日志报建表信息)
 set(SG_ENGINE_SOURCES "")
-foreach(f src/engine/pattern_library.cpp)
+foreach(f src/util/log.cpp src/engine/engine.cpp)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${f})
         list(APPEND SG_ENGINE_SOURCES ${f})
     endif()
 endforeach()
+
+set(SG_ENGINE_HEADERS include/aho_corasick.h include/engine.h)
 
 # 按存在性过滤,便于分步落地
 set(SG_APP_SOURCES
@@ -55,6 +59,9 @@ set(SG_APP_SOURCES
     src/util/log.cpp
     src/db/connection_pool.cpp
     src/db/dao.cpp
+    src/crypto/auth_crypto.cpp
+    src/engine/engine.cpp
+    src/net/app_context.cpp
     src/net/http_server.cpp
     src/net/handlers_auth.cpp
     src/net/handlers_content.cpp
@@ -82,7 +89,20 @@ target_compile_options(ac_bench PRIVATE -O2)
 target_link_libraries(ac_bench PRIVATE Threads::Threads)
 
 # ---------------------------------------------------------------------------
-# 3) 主程序
+# 3) 单元自检:密码 / JWT / 引擎 / 翻译 / 封禁
+# ---------------------------------------------------------------------------
+add_executable(unit_test
+    tests/unit_test.cpp
+    src/crypto/auth_crypto.cpp
+    src/util/config.cpp
+    src/util/log.cpp
+    src/engine/engine.cpp
+    src/net/app_context.cpp)
+target_include_directories(unit_test PRIVATE ${SG_INCLUDE_DIRS})
+target_link_libraries(unit_test PRIVATE Threads::Threads OpenSSL::Crypto)
+
+# ---------------------------------------------------------------------------
+# 4) 主程序
 # ---------------------------------------------------------------------------
 if(SG_APP_SOURCES_EXISTING)
     add_executable(secguard ${SG_APP_SOURCES_EXISTING})

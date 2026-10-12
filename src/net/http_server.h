@@ -1,0 +1,57 @@
+// HTTP 服务与路由(寓言集第 37、41、47 讲)
+//
+// 请求的处理顺序:
+//   1. 取真实 IP(考虑 X-Forwarded-For,因为线上走 Nginx 反代)
+//   2. 封禁检查
+//   3. 令牌桶限流
+//   4. 把请求翻译成待检文本 -> 交给引擎匹配
+//   5. 命中则拦截;无论如何都写一条审计记录
+//   6. 交给业务处理器
+#pragma once
+
+#include <cstdint>
+#include <string>
+
+// 需要完整定义:json_ok/json_err 直接用 Response 的成员
+#include <cpp-httplib/httplib.h>
+
+#include "net/app_context.h"
+
+namespace secguard {
+
+// 一次请求的检测结果,审计落库时用到
+struct ScanRecord {
+    std::string  trace_id;
+    std::string  ip;
+    std::string  uri;
+    std::string  method;
+    std::string  action;            // PASS / BLOCK
+    std::string  rule_hit;          // 命中的规则 ID,逗号分隔
+    int          matched_len = 0;
+    int          status_code = 0;
+    long long    cost_us = 0;
+    std::size_t  scan_bytes = 0;
+    bool         rate_limited = false;
+    bool         was_banned = false;
+    std::string  params_digest;
+    std::int64_t user_id = 0;       // 0 表示未登录
+};
+
+// 限流 / 封禁 / 检测。返回 true 放行;false 表示已拦下(response 已写好)
+bool run_guard(AppContext& ctx, const httplib::Request& req,
+               httplib::Response& res, ScanRecord& rec);
+
+void record_audit(AppContext& ctx, const ScanRecord& rec);
+
+bool current_user(AppContext& ctx, const httplib::Request& req,
+                  std::int64_t& user_id, std::string& username);
+
+void register_routes(httplib::Server& svr, AppContext& ctx);
+void register_auth_routes(httplib::Server& svr, AppContext& ctx);
+void register_content_routes(httplib::Server& svr, AppContext& ctx);
+void register_audit_routes(httplib::Server& svr, AppContext& ctx);
+
+void json_ok(httplib::Response& res, const std::string& body);
+void json_err(httplib::Response& res, int status, const std::string& message);
+
+}  // namespace secguard
