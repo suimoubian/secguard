@@ -55,7 +55,6 @@ static std::string client_ip(const httplib::Request& req) {
 bool run_guard(AppContext& ctx, const httplib::Request& req,
                httplib::Response& res, ScanRecord& rec) {
     const auto t0 = std::chrono::steady_clock::now();
-    const double now = ctx.now_seconds();
 
     rec.trace_id = make_trace_id();
     rec.ip = client_ip(req);
@@ -69,8 +68,9 @@ bool run_guard(AppContext& ctx, const httplib::Request& req,
 
     ctx.requests_total.fetch_add(1);
 
-    // 1) 封禁检查(第 41 讲)
-    if (ctx.guard->is_banned(rec.ip, now)) {
+    // 1) 封禁检查(第 41 讲)。状态在 Redis,多实例共享:
+    //    在 A 实例上被封,换 B 实例也进不来。
+    if (ctx.guard->is_banned(rec.ip)) {
         rec.action = "BLOCK";
         rec.rule_hit = "IP_BANNED";
         rec.status_code = 403;
@@ -83,8 +83,9 @@ bool run_guard(AppContext& ctx, const httplib::Request& req,
         return false;
     }
 
-    // 2) 令牌桶限流(第 38 讲)
-    if (ctx.limiter && !ctx.limiter->try_acquire(now)) {
+    // 2) 令牌桶限流(第 38 讲)。桶在 Redis 里,多实例共享同一份令牌。
+    //    空 suffix = 全局桶;要按 IP 分开限流就传 IP。
+    if (!ctx.guard->allow(rec.ip)) {
         rec.action = "BLOCK";
         rec.rule_hit = "RATE_LIMITED";
         rec.status_code = 429;
@@ -97,7 +98,66 @@ bool run_guard(AppContext& ctx, const httplib::Request& req,
         return false;
     }
 
-    // 3) 把 HTTP 翻成待检文本,交给引擎(第 17 讲)
+    // 3) 重放防护(第 40 讲):时间戳 + nonce
+    //
+    //    只在写请求上做 —— GET 天然幂等,拦截它没有意义。
+    //    require=true 时,缺头就拒;否则只在带了头的时候校验。
+    if (req.method == "POST" || req.method == "PUT" || req.method == "DELETE") {
+        const bool has_ts = req.has_header("X-Timestamp");
+        const bool has_nonce = req.has_header("X-Nonce");
+
+        if (ctx.cfg.replay.require && !(has_ts && has_nonce)) {
+            rec.action = "BLOCK";
+            rec.rule_hit = "REPLAY_MISSING_HEADERS";
+            rec.status_code = 400;
+            ctx.requests_blocked.fetch_add(1);
+            ctx.replay_rejected.fetch_add(1);
+            json_err(res, 400, "缺少 X-Timestamp / X-Nonce 头");
+            const auto t1 = std::chrono::steady_clock::now();
+            rec.cost_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+            record_audit(ctx, rec);
+            return false;
+        }
+
+        if (has_ts && has_nonce) {
+            std::int64_t ts = 0;
+            try {
+                ts = std::stoll(req.get_header_value("X-Timestamp"));
+            } catch (...) {
+                ts = 0;
+            }
+            const std::string nonce = req.get_header_value("X-Nonce");
+
+            // 先看时间戳(便宜),再看 nonce(要访问 Redis)
+            if (!DistributedGuard::timestamp_fresh(ts, ctx.cfg.replay.window_seconds)) {
+                rec.action = "BLOCK";
+                rec.rule_hit = "REPLAY_STALE";
+                rec.status_code = 403;
+                ctx.requests_blocked.fetch_add(1);
+                ctx.replay_rejected.fetch_add(1);
+                json_err(res, 403, "请求时间戳超出允许窗口");
+                const auto t1 = std::chrono::steady_clock::now();
+                rec.cost_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+                record_audit(ctx, rec);
+                return false;
+            }
+            // SET NX EX 一步完成"检查 + 记录",天然原子
+            if (!ctx.guard->consume_nonce(nonce, ctx.cfg.replay.window_seconds)) {
+                rec.action = "BLOCK";
+                rec.rule_hit = "REPLAY_DUPLICATE";
+                rec.status_code = 409;
+                ctx.requests_blocked.fetch_add(1);
+                ctx.replay_rejected.fetch_add(1);
+                json_err(res, 409, "该请求已被处理过(重放)");
+                const auto t1 = std::chrono::steady_clock::now();
+                rec.cost_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+                record_audit(ctx, rec);
+                return false;
+            }
+        }
+    }
+
+    // 4) 把 HTTP 翻成待检文本,交给引擎(第 17 讲)
     const std::string query = (req.target.find('?') != std::string::npos)
                             ? req.target.substr(req.target.find('?') + 1) : std::string();
     const std::string ua = req.has_header("User-Agent")
@@ -123,9 +183,9 @@ bool run_guard(AppContext& ctx, const httplib::Request& req,
         rec.rule_hit = ids;
         if (mr.truncated) rec.rule_hit += "(截断)";
 
-        // 记一次命中,达到阈值就自动封禁
-        ctx.guard->record_hit(rec.ip, now, ctx.cfg.guard.window_seconds,
-                              ctx.cfg.guard.hit_threshold,
+        // 记一次命中,达到阈值就自动封禁(计数也在 Redis,多实例一致)
+        ctx.guard->record_hit(rec.ip, ctx.cfg.guard.hit_threshold,
+                              ctx.cfg.guard.window_seconds,
                               ctx.cfg.guard.ban_seconds);
 
         // 命中即拦截(第 37 讲:规则引擎负责实时拦截)
@@ -168,6 +228,13 @@ void record_audit(AppContext& ctx, const ScanRecord& rec) {
     row.status_code   = rec.status_code;
     row.cost_us       = rec.cost_us;
 
+    // 异步:只入队(纳秒级),后台线程批量落库,不拖慢请求(第 28 讲)
+    if (ctx.audit) {
+        ctx.audit->submit(row);
+        return;
+    }
+
+    // 降级:同步写库(审计管道没起来时的兜底)
     std::vector<AuditLogRow> batch;
     batch.push_back(std::move(row));
     if (!ctx.dao->write_audit_batch(batch)) {
@@ -215,6 +282,19 @@ static void register_core_routes(httplib::Server& svr, AppContext& ctx) {
         j["db_pool_idle"] = ctx.pool ? ctx.pool->idle_count() : 0;
         j["requests_total"] = ctx.requests_total.load();
         j["requests_blocked"] = ctx.requests_blocked.load();
+        j["replay_rejected"] = ctx.replay_rejected.load();
+        // Redis 共享状态:多实例部署时这一项才真正有意义
+        j["redis"] = ctx.redis ? ctx.redis->available() : false;
+        j["guard_mode"] = (ctx.guard && ctx.guard->redis_available()) ? "redis" : "local";
+        // 审计管道:异步时队列深度是关键观察点
+        if (ctx.audit) {
+            j["audit_async"] = true;
+            j["audit_queued"] = ctx.audit->queued();
+            j["audit_written"] = ctx.audit->written();
+            j["audit_dropped"] = ctx.audit->dropped();
+        } else {
+            j["audit_async"] = false;
+        }
         res.status = db_ok ? 200 : 503;
         res.set_content(j.dump(), "application/json; charset=utf-8");
     });

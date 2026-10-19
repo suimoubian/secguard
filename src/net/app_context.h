@@ -1,9 +1,12 @@
-// 应用上下文:各模块共享的状态 + 中间件(寓言集第 38、39、41 讲)
+// 应用上下文:各模块共享的状态(寓言集第 38、39、41 讲)
 //
-// 这里放三样东西:
-//   1. 全局句柄(配置、连接池、DAO、引擎)
-//   2. 限流与封禁状态(令牌桶 + 滑动窗口计数,第 38、41 讲)
+// 这里放:
+//   1. 全局句柄(配置、连接池、DAO、引擎、Redis、分布式防护、审计管道)
+//   2. 登录爆破防护(单机内存足够:失败次数天然低频)
 //   3. 请求进入检测引擎的翻译逻辑(把 HTTP 翻成待检文本,第 17 讲)
+//
+// 注意:限流与 IP 封禁已经移到 DistributedGuard(Redis 共享),
+// 不在这一层做本地状态 —— 否则多实例部署时各限各的,等于没限。
 #pragma once
 
 #include <atomic>
@@ -14,6 +17,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "cache/distributed_guard.h"
+#include "cache/redis_client.h"
+#include "db/audit_writer.h"
 #include "db/connection_pool.h"
 #include "db/dao.h"
 #include "engine.h"
@@ -21,72 +27,40 @@
 
 namespace secguard {
 
-// 令牌桶:rate 控制平均速率,capacity 控制允许的突发(第 38 讲)
-class TokenBucket {
+// 登录爆破防护:同一 用户名+IP 连续失败 N 次 -> 短暂锁定(第 43 讲)
+// 放在本地:登录失败是低频事件,不需要跨实例共享;
+// 即便多实例各锁各的,也只是锁定时间略有差异,不影响安全性。
+class LoginThrottle {
 public:
-    TokenBucket(double rate_per_sec, double capacity)
-        : rate_(rate_per_sec), capacity_(capacity), tokens_(capacity), last_(0.0) {}
-
-    // 取一个令牌;拿不到返回 false(该限流了)
-    // now_seconds:由 AppContext::now_seconds() 提供的秒数(无需是绝对时间,单调即可)
-    bool try_acquire(double now_seconds) {
-        std::lock_guard<std::mutex> lk(mu_);
-        if (last_ == 0.0) last_ = now_seconds;      // 第一次调用时初始化
-        const double elapsed = now_seconds - last_;
-        // 惰性补给:不靠定时器,用的时候现算
-        tokens_ = std::min(capacity_, tokens_ + elapsed * rate_);
-        last_ = now_seconds;
-        if (tokens_ >= 1.0) { tokens_ -= 1.0; return true; }
-        return false;
-    }
+    // 记一次失败。返回 true 表示已达上限,应锁定。
+    bool record_fail(const std::string& key, int window_sec, int limit);
+    void clear(const std::string& key);
+    [[nodiscard]] bool is_locked(const std::string& key, int window_sec, int limit);
 
 private:
-    double rate_;
-    double capacity_;
-    double tokens_;
-    double last_;
+    struct Rec {
+        int    fails = 0;
+        double first_fail = 0.0;
+    };
+    [[nodiscard]] static double now_sec();
+
     std::mutex mu_;
-};
-
-// 命中计数窗口:同一 IP 在 window 秒内命中 N 次 -> 封禁 ban 秒(第 41 讲)
-struct IpRecord {
-    std::vector<double> hits;      // 命中时间戳
-    double banned_until = 0.0;
-    int    login_fails = 0;
-    double login_fail_first = 0.0;
-};
-
-class Guard {
-public:
-    Guard() = default;
-
-    // 记一次命中。返回是否因此触发封禁。
-    bool record_hit(const std::string& ip, double now, int window_sec,
-                    int threshold, int ban_sec);
-    [[nodiscard]] bool is_banned(const std::string& ip, double now);
-    [[nodiscard]] int  banned_count(double now);
-    [[nodiscard]] int  hits_in_window(const std::string& ip, double now, int window_sec);
-
-    // 登录失败计数(第 43 讲:防爆破)
-    bool record_login_fail(const std::string& key, double now, int window_sec, int limit);
-    void clear_login_fail(const std::string& key);
-
-private:
-    std::mutex mu_;
-    std::unordered_map<std::string, IpRecord> recs_;
-    double last_gc_ = 0.0;
+    std::unordered_map<std::string, Rec> recs_;
 };
 
 struct AppContext {
-    Config          cfg;
-    ConnectionPool* pool = nullptr;
-    Dao*            dao = nullptr;
-    Engine*         engine = nullptr;
-    Guard*          guard = nullptr;
-    TokenBucket*    limiter = nullptr;
+    Config           cfg;
+    ConnectionPool*  pool = nullptr;
+    Dao*             dao = nullptr;
+    Engine*          engine = nullptr;
+    RedisClient*     redis = nullptr;
+    DistributedGuard* guard = nullptr;
+    AuditWriter*     audit = nullptr;
+    LoginThrottle*   login_throttle = nullptr;
 
     std::atomic<std::int64_t> requests_total{0};
     std::atomic<std::int64_t> requests_blocked{0};
+    std::atomic<std::int64_t> replay_rejected{0};
     std::chrono::steady_clock::time_point started_at{std::chrono::steady_clock::now()};
 
     [[nodiscard]] double now_seconds() const {

@@ -20,6 +20,9 @@
 
 #include <cpp-httplib/httplib.h>
 
+#include "cache/distributed_guard.h"
+#include "cache/redis_client.h"
+#include "db/audit_writer.h"
 #include "db/connection_pool.h"
 #include "db/dao.h"
 #include "engine.h"
@@ -93,17 +96,40 @@ int main() {
         return 1;   // 连不上库就别装作健康
     }
 
-    // ---- 4. 防护状态 ----
-    Guard guard;
-    TokenBucket limiter(cfg.guard.rate_per_sec, cfg.guard.burst);
+    // ---- 4. Redis:限流 / 封禁 / 重放的共享状态(第 39 讲) ----
+    // 连不上不阻断启动:DistributedGuard 会自动降级为单机版并打日志。
+    auto redis = std::make_unique<RedisClient>(cfg.redis);
+    if (cfg.redis.enabled && !redis->available()) {
+        LOG_WARN(kTag, "Redis 不可用 —— 限流与封禁退回单机版,",
+                 "多实例部署时限额会被放大,请检查 Redis");
+    }
+
+    // ---- 5. 分布式防护 ----
+    DistributedGuard guard(redis.get(), cfg.guard);
+
+    // ---- 6. 审计管道:无锁队列 + 后台批量落库(第 28、35 讲) ----
+    AuditWriterConfig aw_cfg;
+    aw_cfg.batch_size = cfg.audit.batch_size;
+    aw_cfg.flush_interval_ms = cfg.audit.flush_interval_ms;
+    std::unique_ptr<AuditWriter> audit;
+    if (cfg.audit.async) {
+        audit = std::make_unique<AuditWriter>(&dao, aw_cfg);
+        audit->start();
+    } else {
+        LOG_INFO(kTag, "审计走同步写库(配置里关掉了异步)");
+    }
+
+    LoginThrottle login_throttle;
 
     AppContext ctx;
     ctx.cfg = cfg;
     ctx.pool = pool.get();
     ctx.dao = &dao;
     ctx.engine = &engine;
+    ctx.redis = redis.get();
     ctx.guard = &guard;
-    ctx.limiter = &limiter;
+    ctx.audit = audit.get();
+    ctx.login_throttle = &login_throttle;
 
     // ---- 5. 信号:优雅停机 ----
     std::signal(SIGINT, on_signal);
@@ -171,8 +197,21 @@ int main() {
     if (reloader.joinable()) reloader.join();
     if (reaper.joinable()) reaper.join();
 
+    // 审计管道必须最后停:它要把队列里剩下的日志全部写完再退出。
+    // 提前停 = 丢数据;不停 = 进程卡住。
+    if (audit) {
+        audit->stop();
+        LOG_INFO(kTag, "审计管道收尾:写入=", audit->written(),
+                 " 丢弃=", audit->dropped(), " 剩余=", audit->queued());
+    }
+
     const auto st = dao.audit_stats();
     LOG_INFO(kTag, "收尾:本次运行共审计 ", st.total, " 条记录,拦截 ", st.blocked, " 条");
+    LOG_INFO(kTag, "限流与封禁:降级次数=", guard.fallback_count(),
+             (guard.redis_available() ? " (Redis 共享)" : " (单机内存)"));
+    if (redis) {
+        LOG_INFO(kTag, "Redis:命令=", redis->commands(), " 失败=", redis->failures());
+    }
     LOG_INFO(kTag, "连接池统计:建连=", pool->create_count(),
              " 复用=", pool->reuse_count());
     // pool 是 unique_ptr,离开作用域时析构会关闭所有连接 —— 这就是 RAII(第 31 讲)

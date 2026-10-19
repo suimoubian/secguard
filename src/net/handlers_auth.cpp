@@ -102,7 +102,6 @@ void register_auth_routes(httplib::Server& svr, AppContext& ctx) {
 
     // ---- 登录 ----
     svr.Post("/api/login", [&ctx](const httplib::Request& req, httplib::Response& res) {
-        const double now = ctx.now_seconds();
         const std::string ip = req.has_header("X-Forwarded-For")
                              ? req.get_header_value("X-Forwarded-For")
                              : req.remote_addr;
@@ -122,7 +121,9 @@ void register_auth_routes(httplib::Server& svr, AppContext& ctx) {
 
         // 爆破防护:连续失败到上限就短暂锁定(第 43 讲)
         const std::string lock_key = ip + ":" + username;
-        if (ctx.guard->is_banned("login:" + lock_key, now)) {
+        if (ctx.login_throttle->is_locked(lock_key,
+                                          ctx.cfg.guard.login_window_seconds,
+                                          ctx.cfg.guard.login_fail_limit)) {
             json_err(res, 429, "登录尝试过于频繁,请稍后再试"); return;
         }
 
@@ -136,8 +137,8 @@ void register_auth_routes(httplib::Server& svr, AppContext& ctx) {
         }
 
         if (!ok) {
-            const bool locked = ctx.guard->record_login_fail(
-                lock_key, now, ctx.cfg.guard.login_window_seconds,
+            const bool locked = ctx.login_throttle->record_fail(
+                lock_key, ctx.cfg.guard.login_window_seconds,
                 ctx.cfg.guard.login_fail_limit);
             rec.action = "BLOCK";
             rec.rule_hit = "LOGIN_FAIL";
@@ -149,7 +150,7 @@ void register_auth_routes(httplib::Server& svr, AppContext& ctx) {
             return;
         }
 
-        ctx.guard->clear_login_fail(lock_key);
+        ctx.login_throttle->clear(lock_key);
 
         crypto::JwtClaims claims;
         claims.user_id = user->id;

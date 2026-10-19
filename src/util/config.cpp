@@ -99,11 +99,37 @@ bool Config::load(Config& out, std::string& err) {
     if (!env_int("SECGUARD_HIT_THRESHOLD", out.guard.hit_threshold)) { err = "SECGUARD_HIT_THRESHOLD 不是整数"; return false; }
     if (!env_int("SECGUARD_BAN_SECONDS", out.guard.ban_seconds)) { err = "SECGUARD_BAN_SECONDS 不是整数"; return false; }
 
+    // --- Redis:限流 / 封禁 / 重放的共享状态(第 39 讲) ---
+    out.redis.host     = env_str("SECGUARD_REDIS_HOST", out.redis.host);
+    out.redis.password = env_str("SECGUARD_REDIS_PASS", out.redis.password);
+    if (!env_int("SECGUARD_REDIS_PORT", out.redis.port)) { err = "SECGUARD_REDIS_PORT 不是整数"; return false; }
+    if (!env_int("SECGUARD_REDIS_DB", out.redis.db)) { err = "SECGUARD_REDIS_DB 不是整数"; return false; }
+    if (!env_int("SECGUARD_REDIS_POOL", out.redis.pool_size)) { err = "SECGUARD_REDIS_POOL 不是整数"; return false; }
+    if (!env_int("SECGUARD_REDIS_TIMEOUT_MS", out.redis.timeout_ms)) { err = "SECGUARD_REDIS_TIMEOUT_MS 不是整数"; return false; }
+    out.redis.enabled = env_str("SECGUARD_REDIS_ENABLE", "1") != "0";
+
+    // --- 重放防护(第 40 讲) ---
+    out.replay.require = env_str("SECGUARD_REPLAY_REQUIRE", "0") == "1";
+    if (!env_int("SECGUARD_REPLAY_WINDOW", out.replay.window_seconds)) { err = "SECGUARD_REPLAY_WINDOW 不是整数"; return false; }
+    if (out.replay.window_seconds <= 0 || out.replay.window_seconds > 3600) {
+        err = "SECGUARD_REPLAY_WINDOW 必须在 1~3600 秒之间";
+        return false;
+    }
+
+    // --- 审计管道(第 28、35 讲) ---
+    out.audit.async = env_str("SECGUARD_AUDIT_ASYNC", "1") != "0";
+    if (!env_size("SECGUARD_AUDIT_BATCH", out.audit.batch_size)) { err = "SECGUARD_AUDIT_BATCH 不是整数"; return false; }
+    if (!env_int("SECGUARD_AUDIT_FLUSH_MS", out.audit.flush_interval_ms)) { err = "SECGUARD_AUDIT_FLUSH_MS 不是整数"; return false; }
+    if (out.audit.batch_size == 0) { err = "SECGUARD_AUDIT_BATCH 必须为正"; return false; }
+
     // 合理性检查:不合法就拒绝启动,别带着错配置跑(第 67 讲)
     if (out.server.port <= 0 || out.server.port > 65535) { err = "SECGUARD_PORT 超出范围"; return false; }
     if (out.server.backlog <= 0) { err = "SECGUARD_BACKLOG 必须为正"; return false; }
     if (out.engine.max_pattern_len == 0) { err = "SECGUARD_MAX_PATTERN_LEN 必须为正"; return false; }
     if (out.engine.max_text_bytes == 0)  { err = "SECGUARD_MAX_TEXT 必须为正"; return false; }
+    if (out.guard.rate_per_sec <= 0)     { err = "SECGUARD_RATE_PER_SEC 必须为正"; return false; }
+    if (out.guard.hit_threshold <= 0)    { err = "SECGUARD_HIT_THRESHOLD 必须为正"; return false; }
+    if (out.redis.pool_size <= 0)        { err = "SECGUARD_REDIS_POOL 必须为正"; return false; }
     return true;
 }
 
@@ -121,6 +147,17 @@ std::string Config::describe() const {
         << "  文本上限=" << engine.max_text_bytes << "B"
         << "  命中上限=" << engine.max_hits
         << "  热加载间隔=" << engine.reload_interval_seconds << "s\n"
+        << "  防护     速率=" << guard.rate_per_sec << "/s 突发=" << guard.burst
+        << "  封禁=" << guard.hit_threshold << "次/" << guard.window_seconds
+        << "s -> " << guard.ban_seconds << "s\n"
+        << "  Redis    " << (redis.enabled
+               ? (redis.host + ":" + std::to_string(redis.port) + " 池=" + std::to_string(redis.pool_size))
+               : std::string("未启用"))
+        << "  口令=***\n"
+        << "  重放     " << (replay.require ? "强制要求" : "可选")
+        << "  窗口=" << replay.window_seconds << "s\n"
+        << "  审计     " << (audit.async ? "异步" : "同步")
+        << "  批量=" << audit.batch_size << "  间隔=" << audit.flush_interval_ms << "ms\n"
         << "  日志     级别=" << log_level;
     return oss.str();
 }

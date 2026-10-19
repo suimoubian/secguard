@@ -30,8 +30,17 @@ if(NOT MYSQLCPPCONN_INCLUDE_DIR OR NOT MYSQLCPPCONN_LIBRARY)
 endif()
 message(STATUS "MySQL Connector/C++: ${MYSQLCPPCONN_LIBRARY}")
 
-# OpenSSL(随机数;SHA-256/HMAC 自己实现,见 src/crypto/sha256.h)
+# OpenSSL(随机数、SHA-256/HMAC、PBKDF2)
 find_package(OpenSSL REQUIRED)
+
+# hiredis:Redis 客户端(限流 / 封禁 / 重放的共享状态)
+find_path(HIREDIS_INCLUDE_DIR NAMES hiredis/hiredis.h PATHS /usr/include /usr/local/include)
+find_library(HIREDIS_LIBRARY NAMES hiredis PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib)
+if(HIREDIS_INCLUDE_DIR AND HIREDIS_LIBRARY)
+    message(STATUS "hiredis: ${HIREDIS_LIBRARY}")
+else()
+    message(WARNING "找不到 hiredis —— Redis 相关功能将无法编译")
+endif()
 
 # ---------------------------------------------------------------------------
 # 目录
@@ -59,6 +68,9 @@ set(SG_APP_SOURCES
     src/util/log.cpp
     src/db/connection_pool.cpp
     src/db/dao.cpp
+    src/db/audit_writer.cpp
+    src/cache/redis_client.cpp
+    src/cache/distributed_guard.cpp
     src/crypto/auth_crypto.cpp
     src/engine/engine.cpp
     src/net/app_context.cpp
@@ -97,9 +109,11 @@ add_executable(unit_test
     src/util/config.cpp
     src/util/log.cpp
     src/engine/engine.cpp
-    src/net/app_context.cpp)
+    src/net/app_context.cpp
+    src/cache/redis_client.cpp
+    src/cache/distributed_guard.cpp)
 target_include_directories(unit_test PRIVATE ${SG_INCLUDE_DIRS})
-target_link_libraries(unit_test PRIVATE Threads::Threads OpenSSL::Crypto)
+target_link_libraries(unit_test PRIVATE Threads::Threads OpenSSL::Crypto ${HIREDIS_LIBRARY})
 
 # ---------------------------------------------------------------------------
 # 4) 主程序
@@ -110,6 +124,7 @@ if(SG_APP_SOURCES_EXISTING)
     target_link_libraries(secguard PRIVATE
         Threads::Threads
         ${MYSQLCPPCONN_LIBRARY}
+        ${HIREDIS_LIBRARY}
         OpenSSL::SSL
         OpenSSL::Crypto)
 endif()

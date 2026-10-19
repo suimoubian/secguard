@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <string>
 
+#include "cache/redis_client.h"
+
 namespace secguard {
 
 struct DatabaseConfig {
@@ -46,13 +48,29 @@ struct EngineConfig {
 
 // 防护:限流与自动封禁(第 38、41 讲)
 struct GuardConfig {
-    double rate_per_sec = 200.0;        // 令牌桶:平均速率
-    double burst = 400.0;               // 令牌桶:允许的突发
+    // 注意口径:限流是**按 IP** 算的(每个 IP 一个令牌桶)。
+    // 全局单桶会让一个攻击者把所有人的额度吃光;按 IP 分桶更合理,
+    // 代价是对"大量分散 IP"的慢速攻击不敏感 —— 靠封禁阈值那层兜。
+    double rate_per_sec = 200.0;        // 令牌桶:每 IP 平均速率
+    double burst = 400.0;               // 令牌桶:每 IP 允许的突发
     int    window_seconds = 300;        // 命中计数的窗口长度
     int    hit_threshold = 20;          // 窗口内命中多少次触发封禁
     int    ban_seconds = 1800;          // 封禁时长
     int    login_fail_limit = 5;        // 登录连续失败上限(第 43 讲)
     int    login_window_seconds = 300;  // 失败计数窗口
+};
+
+// 重放防护(第 40 讲)
+struct ReplayConfig {
+    bool require = false;          // true = 拒绝没有 nonce/timestamp 的写请求
+    int  window_seconds = 300;     // 时间戳有效期(同时是 nonce 的 TTL)
+};
+
+// 审计管道(第 28、35 讲)
+struct AuditConfig {
+    std::size_t batch_size = 500;      // 攒够多少条写一次
+    int         flush_interval_ms = 1000;  // 或满多久写一次
+    bool        async = true;          // false = 退回同步写库(便于对比)
 };
 
 struct Config {
@@ -61,6 +79,9 @@ struct Config {
     ServerConfig   server;
     EngineConfig   engine;
     GuardConfig    guard;
+    RedisConfig    redis;
+    ReplayConfig   replay;
+    AuditConfig    audit;
     std::string    log_level = "info";  // debug|info|warn|error(第 68 讲)
 
     // 从环境变量装载。缺失必填项时返回 false 并说明原因。

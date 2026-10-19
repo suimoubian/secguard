@@ -37,11 +37,24 @@ void register_audit_routes(httplib::Server& svr, AppContext& ctx) {
         j["distinct_ips"] = st.hits_by_ip;
         j["requests_total"] = ctx.requests_total.load();
         j["requests_blocked"] = ctx.requests_blocked.load();
-        j["banned_now"] = ctx.guard->banned_count(ctx.now_seconds());
+        j["replay_rejected"] = ctx.replay_rejected.load();
         j["db_pool_total"] = ctx.pool->total_count();
         j["db_pool_idle"] = ctx.pool->idle_count();
         j["db_conn_created"] = ctx.pool->create_count();
         j["db_conn_reused"] = ctx.pool->reuse_count();
+        // 防护状态是共享的还是单机的,直接影响多实例部署下的正确性
+        j["guard_mode"] = ctx.guard->redis_available() ? "redis" : "local";
+        j["redis"] = ctx.redis ? ctx.redis->available() : false;
+        if (ctx.redis) {
+            j["redis_commands"] = ctx.redis->commands();
+            j["redis_failures"] = ctx.redis->failures();
+        }
+        j["guard_fallbacks"] = ctx.guard->fallback_count();
+        if (ctx.audit) {
+            j["audit_queued"] = ctx.audit->queued();
+            j["audit_written"] = ctx.audit->written();
+            j["audit_dropped"] = ctx.audit->dropped();
+        }
 
         rec.status_code = 200;
         record_audit(ctx, rec);
@@ -75,7 +88,8 @@ void register_audit_routes(httplib::Server& svr, AppContext& ctx) {
         j["ip"] = ip;
         j["items"] = arr;
         j["hits_in_window"] = ctx.guard->hits_in_window(
-            ip, ctx.now_seconds(), ctx.cfg.guard.window_seconds);
+            ip, ctx.cfg.guard.window_seconds);
+        j["banned"] = ctx.guard->is_banned(ip);
 
         rec.status_code = 200;
         record_audit(ctx, rec);
