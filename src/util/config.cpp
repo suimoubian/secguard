@@ -73,6 +73,7 @@ bool Config::load(Config& out, std::string& err) {
     if (!env_int("SECGUARD_PORT", out.server.port)) { err = "SECGUARD_PORT 不是整数"; return false; }
     if (!env_int("SECGUARD_THREADS", out.server.threads)) { err = "SECGUARD_THREADS 不是整数"; return false; }
     if (!env_int("SECGUARD_BACKLOG", out.server.backlog)) { err = "SECGUARD_BACKLOG 不是整数"; return false; }
+    out.server.trust_proxy = env_str("SECGUARD_TRUST_PROXY", "0") == "1";
     if (out.server.threads <= 0) {
         const unsigned hw = std::thread::hardware_concurrency();
         out.server.threads = static_cast<int>(hw ? hw : 4);

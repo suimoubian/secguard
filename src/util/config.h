@@ -36,6 +36,15 @@ struct ServerConfig {
     int         port = 8080;
     int         threads = 0;            // 0 = 按核心数自动
     int         backlog = 512;          // 监听队列(第 47 讲:连接一多就容易满)
+
+    // 是否信任 X-Forwarded-For 头来取客户端 IP。
+    //
+    // 默认关闭。原因:XFF 是客户端可以随便填的头。如果程序直接对外,
+    // 攻击者发一个 "X-Forwarded-For: 1.2.3.4" 就能伪装成任意 IP,
+    // 从而绕过按 IP 的限流和封禁。
+    // 只有在**确定前面有一层反向代理**、且代理会覆盖(而不是追加)这个头时,
+    // 才应该打开 —— docker-compose.yml 里就是这么配的。
+    bool        trust_proxy = false;
 };
 
 struct EngineConfig {

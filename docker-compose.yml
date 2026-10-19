@@ -1,0 +1,164 @@
+# SecGuard 一键部署
+#
+# 用法:
+#   cp .env.example .env      # 改里面的口令与密钥
+#   docker compose up -d --build
+#   curl http://localhost/health
+#
+# 四个服务:
+#   nginx  对外唯一入口,反代到 app
+#   app    SecGuard 主程序
+#   mysql  业务库
+#   redis  限流/封禁/重放的共享状态
+#
+# 内存估算(2 核 4G 的机器跑得下):
+#   mysql ~400MB  redis ~60MB  app ~80MB  nginx ~15MB
+
+services:
+  # -------------------------------------------------------------------------
+  mysql:
+    image: mysql:8.0
+    container_name: secguard-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?必须在 .env 里设置 MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${SECGUARD_DB_NAME:-secguard}
+      MYSQL_USER: ${SECGUARD_DB_USER:-secguard}
+      MYSQL_PASSWORD: ${SECGUARD_DB_PASS:?必须在 .env 里设置 SECGUARD_DB_PASS}
+    command:
+      # 2 核 4G 的机器上,默认的缓冲池(通常是物理内存的 50%)太贪
+      - --innodb-buffer-pool-size=128M
+      - --max-connections=150
+      # 限制单条查询与包大小,别让一个请求把内存吃光
+      - --max-allowed-packet=16M
+      - --slow-query-log=1
+      - --long-query-time=1
+      # 兼容老连接器的认证方式(Connector/C++ 1.1.x)
+      - --default-authentication-plugin=mysql_native_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      # 首次初始化时自动建库建表(schema.sql 是幂等的)
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      # 不能只 ping:初始化脚本可能还没跑完。
+      # 这里直接查一张业务表,确保 schema 真的建好了才放行 app。
+      test: ["CMD-SHELL",
+             "mysql -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD -e 'SELECT 1 FROM ${SECGUARD_DB_NAME:-secguard}.user LIMIT 1' > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    networks: [backend]
+    # 不对外暴露 3306:数据库只让 app 连,不给外网开口子
+    expose: ["3306"]
+
+  # -------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: secguard-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      # 状态数据丢失的后果:限流计数从零开始、nonce 可重放一次。
+      # 用 AOF 降低这个风险,同时限制内存别把机器拖垮。
+      - --maxmemory
+      - 128mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - "900 1"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks: [backend]
+    expose: ["6379"]
+
+  # -------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: secguard-app
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SECGUARD_DB_HOST: mysql
+      SECGUARD_DB_PORT: "3306"
+      SECGUARD_DB_USER: ${SECGUARD_DB_USER:-secguard}
+      SECGUARD_DB_PASS: ${SECGUARD_DB_PASS:?必须在 .env 里设置 SECGUARD_DB_PASS}
+      SECGUARD_DB_NAME: ${SECGUARD_DB_NAME:-secguard}
+      SECGUARD_DB_POOL: ${SECGUARD_DB_POOL:-8}
+
+      SECGUARD_JWT_SECRET: ${SECGUARD_JWT_SECRET:?必须在 .env 里设置 SECGUARD_JWT_SECRET}
+
+      SECGUARD_REDIS_HOST: redis
+      SECGUARD_REDIS_PORT: "6379"
+      SECGUARD_REDIS_ENABLE: "1"
+
+      SECGUARD_BIND: 0.0.0.0
+      SECGUARD_PORT: "8080"
+      SECGUARD_LOG_LEVEL: ${SECGUARD_LOG_LEVEL:-info}
+
+      # 前面有 nginx 兜着,且 nginx 用 $remote_addr 覆盖 XFF(不是追加),
+      # 所以这里可以放心信任它。如果哪天把 app 直接暴露出去,必须改成 0,
+      # 否则攻击者伪造一个 X-Forwarded-For 就能绕过按 IP 的限流与封禁。
+      SECGUARD_TRUST_PROXY: "1"
+
+      SECGUARD_PATTERN_FILE: /app/rules/attack_patterns.txt
+      SECGUARD_RATE_PER_SEC: ${SECGUARD_RATE_PER_SEC:-200}
+      SECGUARD_RATE_BURST: ${SECGUARD_RATE_BURST:-400}
+      SECGUARD_HIT_THRESHOLD: ${SECGUARD_HIT_THRESHOLD:-20}
+      SECGUARD_BAN_SECONDS: ${SECGUARD_BAN_SECONDS:-1800}
+    networks: [backend]
+    # 注意:这里**不**加 ports 映射。
+    # 程序信任 X-Forwarded-For 头来取真实 IP,如果直接对外暴露,
+    # 攻击者伪造一个 XFF 就能绕过 IP 封禁。所以只让 nginx 进来。
+    expose: ["8080"]
+    # 日志走 stdout,交给 docker 收集(别在容器里写文件)
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    # 优雅停机留足时间:要把审计队列写干净(第 69 讲)
+    stop_grace_period: 30s
+
+  # -------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: secguard-nginx
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_started
+    ports:
+      - "${SECGUARD_HTTP_PORT:-80}:80"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks: [backend]
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+networks:
+  backend:
+    driver: bridge
+
+volumes:
+  mysql_data:
+  redis_data:

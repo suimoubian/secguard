@@ -36,6 +36,22 @@ int int_param(const httplib::Request& req, const char* name, int dflt, int lo, i
     }
 }
 
+// 从 URL 里解析 id。
+// 必须包 try:std::stoll 遇到 "99999999999999999999" 会抛 out_of_range,
+// 不接住的话工作线程直接没了 —— 一个请求就能打挂一个线程。
+bool parse_id(const std::string& s, std::int64_t& out) {
+    if (s.empty() || s.size() > 19) return false;   // bigint 上限 19 位
+    for (unsigned char c : s) {
+        if (c < '0' || c > '9') return false;       // 只接受纯数字
+    }
+    try {
+        out = std::stoll(s);
+        return out > 0;
+    } catch (...) {
+        return false;
+    }
+}
+
 }  // namespace
 
 void register_content_routes(httplib::Server& svr, AppContext& ctx) {
@@ -101,7 +117,8 @@ void register_content_routes(httplib::Server& svr, AppContext& ctx) {
         ScanRecord rec;
         if (!run_guard(ctx, req, res, rec)) return;
 
-        const std::int64_t id = std::stoll(req.matches[1].str());
+        std::int64_t id = 0;
+        if (!parse_id(req.matches[1].str(), id)) { json_err(res, 400, "id 不合法"); return; }
         const auto post = ctx.dao->find_post(id);
         if (!post) { json_err(res, 404, "帖子不存在"); return; }
 
@@ -127,7 +144,8 @@ void register_content_routes(httplib::Server& svr, AppContext& ctx) {
         if (!current_user(ctx, req, uid, uname)) { json_err(res, 401, "请先登录"); return; }
         rec.user_id = uid;
 
-        const std::int64_t id = std::stoll(req.matches[1].str());
+        std::int64_t id = 0;
+        if (!parse_id(req.matches[1].str(), id)) { json_err(res, 400, "id 不合法"); return; }
         const auto wr = ctx.dao->delete_post(id, uid);
         if (wr != WriteResult::kOk) { json_err(res, 404, "帖子不存在或无权删除"); return; }
 
@@ -149,7 +167,8 @@ void register_content_routes(httplib::Server& svr, AppContext& ctx) {
         if (!current_user(ctx, req, uid, uname)) { json_err(res, 401, "请先登录"); return; }
         rec.user_id = uid;
 
-        const std::int64_t post_id = std::stoll(req.matches[1].str());
+        std::int64_t post_id = 0;
+        if (!parse_id(req.matches[1].str(), post_id)) { json_err(res, 400, "id 不合法"); return; }
         if (!ctx.dao->find_post(post_id)) { json_err(res, 404, "帖子不存在"); return; }
 
         nlohmann::json body;
@@ -175,7 +194,8 @@ void register_content_routes(httplib::Server& svr, AppContext& ctx) {
         ScanRecord rec;
         if (!run_guard(ctx, req, res, rec)) return;
 
-        const std::int64_t post_id = std::stoll(req.matches[1].str());
+        std::int64_t post_id = 0;
+        if (!parse_id(req.matches[1].str(), post_id)) { json_err(res, 400, "id 不合法"); return; }
         const int limit = int_param(req, "limit", 50, 1, 200);
         const int offset = int_param(req, "offset", 0, 0, 1000000);
 

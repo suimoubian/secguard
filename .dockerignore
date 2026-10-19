@@ -1,0 +1,32 @@
+# 构建上下文瘦身:不该进镜像的东西别往里拷
+
+# 版本控制
+.git/
+.gitignore
+
+# 构建产物(镜像里重新编)
+build/
+build-*/
+cmake-build-*/
+
+# 本地配置与秘密 —— 绝对不能进镜像
+.env
+*.env
+config.local.*
+secrets.*
+run.sh
+
+# 文档与截图
+docs/
+*.md
+!README.md
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+
+# 运行时产物
+*.log
+core
+core.*

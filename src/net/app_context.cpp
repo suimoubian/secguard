@@ -110,9 +110,19 @@ std::string build_params_digest(const std::string& query, const std::string& bod
 
 std::string extract_bearer(const std::string& authorization) {
     constexpr const char* kPrefix = "Bearer ";
-    if (authorization.rfind(kPrefix, 0) != 0) return {};
-    std::string token = authorization.substr(9);
-    while (!token.empty() && (token.back() == ' ' || token.back() == '\r')) token.pop_back();
+    // 必须用 prefix_len 而不是写死数字。
+    // (踩过的坑:这里曾写成 substr(9),而 "Bearer " 只有 7 个字符,
+    //  于是每个令牌都被切掉前 2 个字符,所有带令牌的请求都 401 ——
+    //  而登录本身是成功的,所以表面上看不出问题。)
+    constexpr std::size_t prefix_len = sizeof("Bearer ") - 1;   // 7
+    if (authorization.size() <= prefix_len) return {};
+    if (authorization.compare(0, prefix_len, kPrefix) != 0) return {};
+
+    std::string token = authorization.substr(prefix_len);
+    while (!token.empty() && (token.back() == ' ' || token.back() == '\r'
+                              || token.back() == '\n')) {
+        token.pop_back();
+    }
     return token;
 }
 

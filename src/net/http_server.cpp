@@ -32,9 +32,15 @@ void json_err(httplib::Response& res, int status, const std::string& message) {
 }
 
 // ---------------------------------------------------------------------------
-// 取真实 IP:线上走 Nginx 反代,req.remote_addr 会是 Nginx 的地址
+// 取真实 IP
+//
+// 只有配置里显式打开 trust_proxy 时才看 X-Forwarded-For。
+// 否则一律用 TCP 连接的对端地址 —— 因为 XFF 是客户端能随便填的头,
+// 无条件信任它等于把"按 IP 限流/封禁"拱手送人。
 // ---------------------------------------------------------------------------
-static std::string client_ip(const httplib::Request& req) {
+static std::string client_ip(const httplib::Request& req, bool trust_proxy) {
+    if (!trust_proxy) return req.remote_addr;
+
     if (req.has_header("X-Forwarded-For")) {
         const std::string xff = req.get_header_value("X-Forwarded-For");
         const auto comma = xff.find(',');
@@ -44,7 +50,8 @@ static std::string client_ip(const httplib::Request& req) {
         if (!first.empty()) return first;
     }
     if (req.has_header("X-Real-IP")) {
-        return req.get_header_value("X-Real-IP");
+        const std::string rip = req.get_header_value("X-Real-IP");
+        if (!rip.empty()) return rip;
     }
     return req.remote_addr;
 }
@@ -57,7 +64,7 @@ bool run_guard(AppContext& ctx, const httplib::Request& req,
     const auto t0 = std::chrono::steady_clock::now();
 
     rec.trace_id = make_trace_id();
-    rec.ip = client_ip(req);
+    rec.ip = client_ip(req, ctx.cfg.server.trust_proxy);
     rec.uri = req.path;
     if (!req.params.empty()) rec.uri = req.path;   // 查询串单独落 digest
     rec.method = req.method;

@@ -124,7 +124,7 @@ int main() {
         check(!lt.is_locked("9.9.9.9:bob", 300, 5), "别的 key 不受影响");
     }
 
-    std::printf("\n=== 6. params_digest 脱敏 ===\n");
+    std::printf("\n=== 6. params_digest 脱敏 + Bearer 解析 ===\n");
     {
         const std::string d1 = build_params_digest("a=1", "b=2");
         const std::string d2 = build_params_digest("a=1", "b=2");
@@ -132,6 +132,16 @@ int main() {
         check(d1 == d2, "同样输入摘要相同");
         check(d1 != d3, "不同输入摘要不同");
         check(d1.find("b=2") == std::string::npos, "原文不出现在摘要里");
+
+        // Bearer 解析:前缀长度必须算对,不能写死数字
+        // (踩过的坑:substr(9) 把令牌前 2 个字符切掉了,导致所有带令牌的请求 401)
+        const std::string tok = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOjF9.abc";
+        check(extract_bearer("Bearer " + tok) == tok, "Bearer 前缀被正确剥掉(不丢字符)");
+        check(extract_bearer("Bearer " + tok + "\r\n") == tok, "尾部换行被去掉");
+        check(extract_bearer(tok).empty(), "没有 Bearer 前缀 -> 空");
+        check(extract_bearer("Basic abc").empty(), "别的认证方式不算");
+        check(extract_bearer("Bearer ").empty(), "只有前缀 -> 空");
+        check(extract_bearer("").empty(), "空串 -> 空");
     }
 
     std::printf("\n=== 7. 无锁 MPSC 队列 ===\n");

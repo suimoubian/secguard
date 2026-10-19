@@ -102,12 +102,12 @@ void register_auth_routes(httplib::Server& svr, AppContext& ctx) {
 
     // ---- 登录 ----
     svr.Post("/api/login", [&ctx](const httplib::Request& req, httplib::Response& res) {
-        const std::string ip = req.has_header("X-Forwarded-For")
-                             ? req.get_header_value("X-Forwarded-For")
-                             : req.remote_addr;
-
         ScanRecord rec;
         if (!run_guard(ctx, req, res, rec)) return;
+
+        // IP 只从 run_guard 里取,不在这里另算一遍 ——
+        // 两处各算各的,迟早会出现"限流用的是 A 口径、锁定用的是 B 口径"。
+        const std::string& ip = rec.ip;
 
         nlohmann::json body;
         if (!parse_body(req, body)) { json_err(res, 400, "请求体必须是 JSON 对象"); return; }
