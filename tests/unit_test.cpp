@@ -86,8 +86,17 @@ int main() {
                 {"<script>alert(1)</script>", true},
                 {"../../../../etc/passwd",    true},
                 {"; cat /etc/passwd",         true},
+                {"powershell -enc SQBFAFgA",  true},
                 {"hello world normal text",   false},
                 {"this is a shopping list",   false},
+                // 误报回归:正常客户端的 UA 不能被判成攻击
+                // (原来特征库里是裸词 "powershell",导致 WindowsPowerShell 的 UA 全被拦)
+                {"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                 "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", false},
+                {"Mozilla/5.0 (Windows NT; Windows NT 10.0; zh-CN) "
+                 "WindowsPowerShell/5.1.19041.5609", false},
+                {"curl/8.5.0",                false},
+                {"python-requests/2.31.0",    false},
             };
             for (const auto& c : cases) {
                 const auto mr = eng.search(c.text);
