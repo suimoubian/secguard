@@ -17,6 +17,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "ai/analyzer.h"
+#include "ai/llm_client.h"
 #include "cache/distributed_guard.h"
 #include "cache/redis_client.h"
 #include "db/audit_writer.h"
@@ -57,6 +59,8 @@ struct AppContext {
     DistributedGuard* guard = nullptr;
     AuditWriter*     audit = nullptr;
     LoginThrottle*   login_throttle = nullptr;
+    LlmClient*       llm = nullptr;
+    Analyzer*        analyzer = nullptr;
 
     std::atomic<std::int64_t> requests_total{0};
     std::atomic<std::int64_t> requests_blocked{0};

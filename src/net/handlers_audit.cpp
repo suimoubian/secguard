@@ -25,9 +25,8 @@ bool valid_ip_like(const std::string& s) {
 
 void register_audit_routes(httplib::Server& svr, AppContext& ctx) {
     // ---- 总体统计 ----
-    svr.Get("/api/audit/stats", [&ctx](const httplib::Request& req, httplib::Response& res) {
-        ScanRecord rec;
-        if (!run_guard(ctx, req, res, rec)) return;
+    svr.Get("/api/audit/stats", [&ctx](const httplib::Request&, httplib::Response& res) {
+        ScanRecord& rec = current_scan();
 
         const auto st = ctx.dao->audit_stats();
         nlohmann::json j;
@@ -63,8 +62,7 @@ void register_audit_routes(httplib::Server& svr, AppContext& ctx) {
 
     // ---- 按 IP 查最近的拦截记录(走 idx_ip_time 索引) ----
     svr.Get("/api/audit/by-ip", [&ctx](const httplib::Request& req, httplib::Response& res) {
-        ScanRecord rec;
-        if (!run_guard(ctx, req, res, rec)) return;
+        ScanRecord& rec = current_scan();
 
         if (!req.has_param("ip")) { json_err(res, 400, "缺少 ip 参数"); return; }
         const std::string ip = req.get_param_value("ip");
@@ -97,9 +95,8 @@ void register_audit_routes(httplib::Server& svr, AppContext& ctx) {
     });
 
     // ---- 特征库信息 ----
-    svr.Get("/api/rules", [&ctx](const httplib::Request& req, httplib::Response& res) {
-        ScanRecord rec;
-        if (!run_guard(ctx, req, res, rec)) return;
+    svr.Get("/api/rules", [&ctx](const httplib::Request&, httplib::Response& res) {
+        ScanRecord& rec = current_scan();
 
         nlohmann::json j;
         j["rule_count"] = ctx.engine->rule_count();
@@ -113,9 +110,8 @@ void register_audit_routes(httplib::Server& svr, AppContext& ctx) {
     });
 
     // ---- 热加载:不停止服务换规则(第 14 讲) ----
-    svr.Post("/api/rules/reload", [&ctx](const httplib::Request& req, httplib::Response& res) {
-        ScanRecord rec;
-        if (!run_guard(ctx, req, res, rec)) return;
+    svr.Post("/api/rules/reload", [&ctx](const httplib::Request&, httplib::Response& res) {
+        ScanRecord& rec = current_scan();
 
         std::size_t n = 0;
         const bool changed = ctx.engine->reload_if_changed(
@@ -130,6 +126,180 @@ void register_audit_routes(httplib::Server& svr, AppContext& ctx) {
         } else {
             j["note"] = "文件未变化或加载失败(失败时保留旧表)";
         }
+
+        rec.status_code = 200;
+        record_audit(ctx, rec);
+        json_ok(res, j.dump());
+    });
+
+    // -----------------------------------------------------------------------
+    // W6:告警与 AI 分析
+    // -----------------------------------------------------------------------
+
+    // ---- 告警列表 ----
+    svr.Get("/api/alerts", [&ctx](const httplib::Request& req, httplib::Response& res) {
+        ScanRecord& rec = current_scan();
+
+        int limit = 20;
+        int offset = 0;
+        if (req.has_param("limit")) {
+            try { limit = std::stoi(req.get_param_value("limit")); } catch (...) {}
+            if (limit < 1) limit = 1;
+            if (limit > 200) limit = 200;
+        }
+        if (req.has_param("offset")) {
+            try { offset = std::stoi(req.get_param_value("offset")); } catch (...) {}
+            if (offset < 0) offset = 0;
+        }
+
+        const auto rows = ctx.dao->list_alerts(limit, offset);
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& a : rows) {
+            arr.push_back({{"id", a.id},
+                           {"ip", a.ip},
+                           {"threat_type", a.threat_type},
+                           {"severity", a.severity},
+                           {"confidence", a.confidence},
+                           {"reasoning", a.reasoning},
+                           {"log_ids", a.log_ids},
+                           {"status", a.status},
+                           {"created_at", a.created_at}});
+        }
+
+        const auto st = ctx.dao->alert_stats();
+        nlohmann::json j;
+        j["items"] = arr;
+        j["stats"] = {{"total", st.total},
+                      {"pending", st.pending},
+                      {"confirmed", st.confirmed},
+                      {"false_positive", st.false_positive},
+                      {"critical", st.critical},
+                      {"high", st.high}};
+        j["limit"] = limit;
+        j["offset"] = offset;
+
+        rec.status_code = 200;
+        record_audit(ctx, rec);
+        json_ok(res, j.dump());
+    });
+
+    // ---- 人工改告警状态:1 已确认 / 2 误报 ----
+    //
+    // 为什么要有这个:LLM 一定有误判。误判不可怕,
+    // 可怕的是误判没地方纠正、也没记录 —— 那样连"模型准不准"都无从评估。
+    svr.Post(R"(/api/alerts/(\d+)/status)",
+             [&ctx](const httplib::Request& req, httplib::Response& res) {
+        ScanRecord& rec = current_scan();
+
+        std::int64_t id = 0;
+        {
+            const std::string s = req.matches[1].str();
+            if (s.empty() || s.size() > 19) { json_err(res, 400, "id 不合法"); return; }
+            try { id = std::stoll(s); } catch (...) { json_err(res, 400, "id 不合法"); return; }
+            if (id <= 0) { json_err(res, 400, "id 不合法"); return; }
+        }
+
+        int status = -1;
+        if (req.has_param("status")) {
+            try { status = std::stoi(req.get_param_value("status")); } catch (...) {}
+        } else {
+            const auto body = nlohmann::json::parse(req.body, nullptr, false);
+            if (!body.is_discarded() && body.is_object() && body.contains("status")
+                && body["status"].is_number_integer()) {
+                status = body["status"].get<int>();
+            }
+        }
+        if (status != 1 && status != 2) {
+            json_err(res, 400, "status 只能是 1(已确认)或 2(误报)");
+            return;
+        }
+
+        if (ctx.dao->set_alert_status(id, status) != WriteResult::kOk) {
+            json_err(res, 404, "告警不存在或更新失败");
+            return;
+        }
+
+        rec.status_code = 200;
+        record_audit(ctx, rec);
+
+        nlohmann::json j;
+        j["id"] = id;
+        j["status"] = status;
+        j["meaning"] = (status == 1 ? "已确认" : "误报");
+        json_ok(res, j.dump());
+    });
+
+    // ---- 手动触发一轮分析(演示与运维用) ----
+    svr.Post("/api/analyze/run", [&ctx](const httplib::Request&, httplib::Response& res) {
+        ScanRecord& rec = current_scan();
+
+        if (!ctx.analyzer) { json_err(res, 503, "分析层未初始化"); return; }
+        if (!ctx.cfg.ai.enabled) {
+            json_err(res, 409, "分析层未启用(设 SECGUARD_AI_ENABLE=1)");
+            return;
+        }
+        if (!ctx.llm || !ctx.llm->available()) {
+            json_err(res, 409, "LLM 不可用,检查 SECGUARD_LLM_KEY / PROVIDER");
+            return;
+        }
+
+        const auto before = ctx.analyzer->stats();
+        const bool did = ctx.analyzer->run_once_manual();
+        const auto& after = ctx.analyzer->stats();
+
+        nlohmann::json j;
+        j["ran"] = did;
+        j["calls"] = after.calls - before.calls;
+        j["ok_calls"] = after.ok_calls - before.ok_calls;
+        j["transport_errors"] = after.transport_errors - before.transport_errors;
+        j["parse_errors"] = after.parse_errors - before.parse_errors;
+        j["alerts_created"] = after.alerts_created - before.alerts_created;
+        j["skipped_low_confidence"] = after.skipped_low_confidence
+                                    - before.skipped_low_confidence;
+        j["skipped_not_attack"] = after.skipped_not_attack - before.skipped_not_attack;
+        j["provider"] = ctx.llm->provider();
+        j["model"] = ctx.llm->model();
+        if (!did) j["note"] = "没有可分析的记录(或达到每分钟调用上限)";
+
+        rec.status_code = 200;
+        record_audit(ctx, rec);
+        json_ok(res, j.dump());
+    });
+
+    // ---- 分析层状态 ----
+    svr.Get("/api/analyze/stats", [&ctx](const httplib::Request&, httplib::Response& res) {
+        ScanRecord& rec = current_scan();
+
+        nlohmann::json j;
+        j["enabled"] = ctx.cfg.ai.enabled;
+        j["provider"] = ctx.llm ? ctx.llm->provider() : "none";
+        j["model"] = ctx.llm ? ctx.llm->model() : "none";
+        j["llm_available"] = ctx.llm ? ctx.llm->available() : false;
+        j["min_confidence"] = ctx.cfg.ai.min_confidence;
+        j["interval_seconds"] = ctx.cfg.ai.interval_seconds;
+        if (ctx.analyzer) {
+            const auto& s = ctx.analyzer->stats();
+            j["rounds"] = s.rounds;
+            j["records_seen"] = s.records_seen;
+            j["groups"] = s.groups;
+            j["calls"] = s.calls;
+            j["ok_calls"] = s.ok_calls;
+            j["transport_errors"] = s.transport_errors;
+            j["parse_errors"] = s.parse_errors;
+            j["alerts_created"] = s.alerts_created;
+            j["skipped_low_confidence"] = s.skipped_low_confidence;
+            j["skipped_not_attack"] = s.skipped_not_attack;
+            j["rate_limited"] = s.rate_limited;
+            j["last_round_ms"] = s.last_round_ms;
+        }
+        if (ctx.llm) {
+            j["llm_requests"] = ctx.llm->requests();
+            j["llm_retries"] = ctx.llm->retries();
+            j["llm_failures"] = ctx.llm->failures();
+        }
+        const auto st = ctx.dao->alert_stats();
+        j["alerts"] = {{"total", st.total}, {"pending", st.pending},
+                       {"confirmed", st.confirmed}, {"false_positive", st.false_positive}};
 
         rec.status_code = 200;
         record_audit(ctx, rec);

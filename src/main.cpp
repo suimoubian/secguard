@@ -20,6 +20,8 @@
 
 #include <cpp-httplib/httplib.h>
 
+#include "ai/analyzer.h"
+#include "ai/llm_client.h"
 #include "cache/distributed_guard.h"
 #include "cache/redis_client.h"
 #include "db/audit_writer.h"
@@ -82,6 +84,11 @@ int main() {
     }
 
     // ---- 3. 数据库连接池 ----
+    //
+    // 这里要重试。容器编排里 depends_on: service_healthy 只能保证
+    // `compose up` 的顺序;一旦主机重启,app 容器会被 restart 策略单独拉起来,
+    // 此时 MySQL 还在初始化 —— 原来直接 exit(1) 就会 crash-loop。
+    // 有界重试(默认 60 秒)既不会永远等下去,也不会因为暂时没就绪就反复崩溃。
     std::unique_ptr<ConnectionPool> pool;
     try {
         pool = std::make_unique<ConnectionPool>(cfg.db);
@@ -90,7 +97,22 @@ int main() {
         return 1;
     }
     Dao dao(*pool);
-    if (!dao.ping()) {
+
+    constexpr int kDbMaxAttempts = 30;
+    constexpr int kDbRetrySleepMs = 2000;
+    bool db_ok = false;
+    for (int attempt = 1; attempt <= kDbMaxAttempts; ++attempt) {
+        if (dao.ping()) { db_ok = true; break; }
+        if (attempt == 1) {
+            LOG_WARN(kTag, "数据库暂时连不上,开始重试(最多 ",
+                     kDbMaxAttempts * kDbRetrySleepMs / 1000, " 秒)");
+        } else {
+            LOG_INFO(kTag, "数据库重试 ", attempt, "/", kDbMaxAttempts);
+        }
+        if (g_stop_requested.load()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(kDbRetrySleepMs));
+    }
+    if (!db_ok) {
         LOG_ERROR(kTag, "数据库连接不通。检查 SECGUARD_DB_HOST/USER/PASS,",
                   " 以及 MySQL 是否已启动、secguard 库是否已建表");
         return 1;   // 连不上库就别装作健康
@@ -121,6 +143,15 @@ int main() {
 
     LoginThrottle login_throttle;
 
+    // ---- 7. AI 分析层(第 59~63 讲) ----
+    LlmClient llm(cfg.llm);
+    Analyzer analyzer(&llm, &dao, cfg.ai);
+    if (!cfg.ai.enabled) {
+        LOG_INFO(kTag, "AI 分析层未启用(设 SECGUARD_AI_ENABLE=1 打开)");
+    } else if (!llm.available()) {
+        LOG_WARN(kTag, "AI 分析层已启用但 LLM 不可用,不会产生告警");
+    }
+
     AppContext ctx;
     ctx.cfg = cfg;
     ctx.pool = pool.get();
@@ -130,6 +161,8 @@ int main() {
     ctx.guard = &guard;
     ctx.audit = audit.get();
     ctx.login_throttle = &login_throttle;
+    ctx.llm = &llm;
+    ctx.analyzer = &analyzer;
 
     // ---- 5. 信号:优雅停机 ----
     std::signal(SIGINT, on_signal);
@@ -188,6 +221,29 @@ int main() {
         }
     });
 
+    // 7c. AI 分析层:定时把待分析的高危记录送 LLM(第 59~63 讲)
+    //
+    // 放在后台线程,是因为一次 LLM 调用要几百毫秒到几秒,
+    // 绝不能占着请求线程。它做的事是"分钟级离线分析",
+    // 与请求链路上的微秒级拦截是两条完全独立的路径。
+    std::thread ai_worker([&] {
+        if (!cfg.ai.enabled) return;
+        const int interval = cfg.ai.interval_seconds;
+        // 启动后先等一会儿,让服务先稳定下来(也避免和 DB 预热抢资源)
+        const int delay_ticks = std::max(0, cfg.ai.startup_delay_seconds * 2);
+        for (int i = 0; i < delay_ticks && !g_stop_requested.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+        while (!g_stop_requested.load()) {
+            analyzer.run_once();
+            // 分小片睡,保证收到停止信号能及时退出
+            for (int i = 0; i < interval * 2 && !g_stop_requested.load(); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
+        }
+        LOG_INFO(kTag, "AI 分析线程退出");
+    });
+
     // ---- 8. 跑起来(阻塞直到 stop) ----
     const bool ok = svr.listen_after_bind();
     if (!ok) LOG_WARN(kTag, "服务退出时返回非正常状态");
@@ -195,6 +251,7 @@ int main() {
     // ---- 9. 收尾:三样都要收(第 69 讲) ----
     g_stop_requested.store(true);
     if (reloader.joinable()) reloader.join();
+    if (ai_worker.joinable()) ai_worker.join();
     if (reaper.joinable()) reaper.join();
 
     // 审计管道必须最后停:它要把队列里剩下的日志全部写完再退出。
@@ -207,6 +264,17 @@ int main() {
 
     const auto st = dao.audit_stats();
     LOG_INFO(kTag, "收尾:本次运行共审计 ", st.total, " 条记录,拦截 ", st.blocked, " 条");
+    if (cfg.ai.enabled) {
+        const auto& as = analyzer.stats();
+        LOG_INFO(kTag, "AI 分析:轮次=", as.rounds,
+                 " 记录=", as.records_seen,
+                 " 调用=", as.calls, "(成功 ", as.ok_calls,
+                 " 传输失败 ", as.transport_errors,
+                 " 解析失败 ", as.parse_errors, ")",
+                 " 新增告警=", as.alerts_created);
+        LOG_INFO(kTag, "LLM 累计:请求=", llm.requests(),
+                 " 重试=", llm.retries(), " 失败=", llm.failures());
+    }
     LOG_INFO(kTag, "限流与封禁:降级次数=", guard.fallback_count(),
              (guard.redis_available() ? " (Redis 共享)" : " (单机内存)"));
     if (redis) {

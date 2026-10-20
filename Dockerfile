@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl-dev \
         libmysqlcppconn-dev \
         libhiredis-dev \
+        libcurl4-openssl-dev \
         nlohmann-json3-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -66,12 +67,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 #                       它自己会带上 libmysqlclient21)
 #   libssl3             OpenSSL 3
 #   libhiredis0.14      Redis 客户端(soname 是 libhiredis.so.0.14)
-#   ca-certificates     出网时校验证书要用
+#   libcurl4            LLM API 调用(W6)
+#   ca-certificates     出网调 LLM 时要校验证书
 #   curl                健康检查用
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libmysqlcppconn7v5 \
         libssl3 \
         libhiredis0.14 \
+        libcurl4 \
         ca-certificates \
         curl \
     && rm -rf /var/lib/apt/lists/*

@@ -46,6 +46,7 @@ struct CommentRow {
 };
 
 struct AuditLogRow {
+    std::int64_t id = 0;                // 主键(W6 标记 analyzed 要用)
     std::string  trace_id;
     std::string  ip;
     std::optional<std::int64_t> user_id;
@@ -57,6 +58,29 @@ struct AuditLogRow {
     std::string  action;                // PASS / BLOCK / ALERT
     int          status_code = 0;
     std::int64_t cost_us = 0;
+    std::string  created_at;
+};
+
+// 一条告警(LLM 分析产出)
+struct AlertRow {
+    std::int64_t id = 0;
+    std::string  ip;
+    std::string  threat_type;
+    std::string  severity;              // LOW/MEDIUM/HIGH/CRITICAL
+    double       confidence = 0.0;      // 0.000 ~ 1.000
+    std::string  reasoning;
+    std::string  log_ids;               // 逗号分隔的 audit_log.id
+    int          status = 0;            // 0待处理 1已确认 2误报
+    std::string  created_at;
+};
+
+struct AlertStats {
+    std::int64_t total = 0;
+    std::int64_t pending = 0;
+    std::int64_t confirmed = 0;
+    std::int64_t false_positive = 0;
+    std::int64_t critical = 0;
+    std::int64_t high = 0;
 };
 
 struct AuditStats {
@@ -100,6 +124,21 @@ public:
     bool write_audit_batch(const std::vector<AuditLogRow>& rows);
     [[nodiscard]] AuditStats audit_stats();
     [[nodiscard]] std::vector<AuditLogRow> recent_blocked(const std::string& ip, int limit);
+
+    // ---- W6:给 AI 分析层用 ----
+    // 取待分析的记录:只挑"值得分析"的 —— 被拦截过、且不是限流/封禁这类
+    // 纯策略性拦截(那种不需要 LLM 再判断一遍,浪费钱)。
+    // 按时间倒序,走 idx_analyzed 索引。
+    [[nodiscard]] std::vector<AuditLogRow> fetch_unanalyzed(int limit, int lookback_hours);
+
+    // 标记已分析。批量更新,避免一条一条 round-trip。
+    bool mark_analyzed(const std::vector<std::int64_t>& ids);
+
+    WriteResult insert_alert(const AlertRow& alert, std::int64_t& new_id);
+    [[nodiscard]] std::vector<AlertRow> list_alerts(int limit, int offset);
+    [[nodiscard]] AlertStats alert_stats();
+    // 人工改告警状态(1 已确认 / 2 误报)
+    WriteResult set_alert_status(std::int64_t id, int status);
 
     // 连通性自检,给 /health 用
     [[nodiscard]] bool ping();

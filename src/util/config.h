@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <string>
 
+#include "ai/llm_client.h"
 #include "cache/redis_client.h"
 
 namespace secguard {
@@ -82,6 +83,18 @@ struct AuditConfig {
     bool        async = true;          // false = 退回同步写库(便于对比)
 };
 
+// AI 分析层(第 59~63 讲)
+struct AiConfig {
+    bool   enabled = false;          // 默认关:没有 API Key 就别跑
+    int    interval_seconds = 60;    // 多久跑一轮
+    int    startup_delay_seconds = 5;// 启动后等多久跑第一轮(别和 DB 预热抢资源)
+    int    batch_size = 10;          // 每轮最多拉多少条待分析记录
+    int    max_groups_per_round = 5; // 每轮最多调几次 LLM(按 IP 分组)
+    double min_confidence = 0.6;     // 置信度门槛,低于此不写告警
+    int    max_requests_per_minute = 10;   // 成本控制
+    int    lookback_hours = 24;      // 只看最近多久的记录
+};
+
 struct Config {
     DatabaseConfig db;
     AuthConfig     auth;
@@ -91,6 +104,8 @@ struct Config {
     RedisConfig    redis;
     ReplayConfig   replay;
     AuditConfig    audit;
+    LlmConfig      llm;
+    AiConfig       ai;
     std::string    log_level = "info";  // debug|info|warn|error(第 68 讲)
 
     // 从环境变量装载。缺失必填项时返回 false 并说明原因。

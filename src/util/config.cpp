@@ -123,6 +123,63 @@ bool Config::load(Config& out, std::string& err) {
     if (!env_int("SECGUARD_AUDIT_FLUSH_MS", out.audit.flush_interval_ms)) { err = "SECGUARD_AUDIT_FLUSH_MS 不是整数"; return false; }
     if (out.audit.batch_size == 0) { err = "SECGUARD_AUDIT_BATCH 必须为正"; return false; }
 
+    // --- LLM(第 61 讲):密钥只从环境变量来,不设默认值 ---
+    out.llm.provider = env_str("SECGUARD_LLM_PROVIDER", out.llm.provider);
+    out.llm.base_url = env_str("SECGUARD_LLM_BASE_URL", out.llm.base_url);
+    out.llm.model    = env_str("SECGUARD_LLM_MODEL", out.llm.model);
+    out.llm.api_key  = env_str("SECGUARD_LLM_KEY", "");
+    if (!env_int("SECGUARD_LLM_TIMEOUT_MS", out.llm.timeout_ms)) { err = "SECGUARD_LLM_TIMEOUT_MS 不是整数"; return false; }
+    if (!env_int("SECGUARD_LLM_MAX_RETRIES", out.llm.max_retries)) { err = "SECGUARD_LLM_MAX_RETRIES 不是整数"; return false; }
+    if (!env_int("SECGUARD_LLM_MAX_TOKENS", out.llm.max_tokens)) { err = "SECGUARD_LLM_MAX_TOKENS 不是整数"; return false; }
+    {
+        const char* t = std::getenv("SECGUARD_LLM_TEMPERATURE");
+        if (t && *t) out.llm.temperature = std::strtod(t, nullptr);
+    }
+    if (out.llm.timeout_ms <= 0 || out.llm.timeout_ms > 120000) {
+        err = "SECGUARD_LLM_TIMEOUT_MS 必须在 1~120000 之间";
+        return false;
+    }
+    if (out.llm.max_retries < 0 || out.llm.max_retries > 5) {
+        err = "SECGUARD_LLM_MAX_RETRIES 必须在 0~5 之间";
+        return false;
+    }
+    if (out.llm.provider != "mock" && out.llm.provider != "openai") {
+        err = "SECGUARD_LLM_PROVIDER 只支持 mock 或 openai";
+        return false;
+    }
+
+    // --- AI 分析层(第 59、63 讲) ---
+    out.ai.enabled = env_str("SECGUARD_AI_ENABLE", "0") == "1";
+    if (!env_int("SECGUARD_AI_INTERVAL", out.ai.interval_seconds)) { err = "SECGUARD_AI_INTERVAL 不是整数"; return false; }
+    if (!env_int("SECGUARD_AI_STARTUP_DELAY", out.ai.startup_delay_seconds)) { err = "SECGUARD_AI_STARTUP_DELAY 不是整数"; return false; }
+    if (!env_int("SECGUARD_AI_BATCH", out.ai.batch_size)) { err = "SECGUARD_AI_BATCH 不是整数"; return false; }
+    if (!env_int("SECGUARD_AI_MAX_GROUPS", out.ai.max_groups_per_round)) { err = "SECGUARD_AI_MAX_GROUPS 不是整数"; return false; }
+    if (!env_int("SECGUARD_AI_RPM", out.ai.max_requests_per_minute)) { err = "SECGUARD_AI_RPM 不是整数"; return false; }
+    if (!env_int("SECGUARD_AI_LOOKBACK_HOURS", out.ai.lookback_hours)) { err = "SECGUARD_AI_LOOKBACK_HOURS 不是整数"; return false; }
+    {
+        const char* mc = std::getenv("SECGUARD_AI_MIN_CONFIDENCE");
+        if (mc && *mc) out.ai.min_confidence = std::strtod(mc, nullptr);
+    }
+    if (!(out.ai.min_confidence >= 0.0 && out.ai.min_confidence <= 1.0)) {
+        err = "SECGUARD_AI_MIN_CONFIDENCE 必须在 0~1 之间";
+        return false;
+    }
+    if (out.ai.max_requests_per_minute <= 0) {
+        err = "SECGUARD_AI_RPM 必须为正";
+        return false;
+    }
+    if (out.ai.enabled && out.ai.interval_seconds <= 0) {
+        err = "SECGUARD_AI_INTERVAL 必须为正";
+        return false;
+    }
+    // 开了分析层却没有可用的 LLM,直接拒绝启动 ——
+    // 否则它会静默地什么都不做,还让人以为在跑
+    if (out.ai.enabled && out.llm.provider != "mock" && out.llm.api_key.empty()) {
+        err = "SECGUARD_AI_ENABLE=1 但缺少 SECGUARD_LLM_KEY"
+              "(要离线试跑请设 SECGUARD_LLM_PROVIDER=mock)";
+        return false;
+    }
+
     // 合理性检查:不合法就拒绝启动,别带着错配置跑(第 67 讲)
     if (out.server.port <= 0 || out.server.port > 65535) { err = "SECGUARD_PORT 超出范围"; return false; }
     if (out.server.backlog <= 0) { err = "SECGUARD_BACKLOG 必须为正"; return false; }
@@ -159,6 +216,15 @@ std::string Config::describe() const {
         << "  窗口=" << replay.window_seconds << "s\n"
         << "  审计     " << (audit.async ? "异步" : "同步")
         << "  批量=" << audit.batch_size << "  间隔=" << audit.flush_interval_ms << "ms\n"
+        << "  LLM      " << llm.provider << " 模型=" << llm.model
+        << " 地址=" << llm.base_url
+        << " 密钥=" << (llm.api_key.empty() ? std::string("未设置") : std::string("***"))
+        << " 超时=" << llm.timeout_ms << "ms 重试=" << llm.max_retries << "\n"
+        << "  分析层   " << (ai.enabled ? "启用" : "关闭")
+        << "  间隔=" << ai.interval_seconds << "s"
+        << " 批量=" << ai.batch_size
+        << " 每分钟调用上限=" << ai.max_requests_per_minute
+        << " 置信度门槛=" << ai.min_confidence << "\n"
         << "  日志     级别=" << log_level;
     return oss.str();
 }

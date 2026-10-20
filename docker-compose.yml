@@ -122,6 +122,20 @@ services:
       SECGUARD_RATE_BURST: ${SECGUARD_RATE_BURST:-400}
       SECGUARD_HIT_THRESHOLD: ${SECGUARD_HIT_THRESHOLD:-20}
       SECGUARD_BAN_SECONDS: ${SECGUARD_BAN_SECONDS:-1800}
+
+      # ---- AI 分析层(W6)----
+      # 默认关闭:没有 API Key 就不该跑。
+      # 要演示可以设 SECGUARD_LLM_PROVIDER=mock(不联网,结果会是假数据)。
+      SECGUARD_AI_ENABLE: ${SECGUARD_AI_ENABLE:-0}
+      SECGUARD_AI_INTERVAL: ${SECGUARD_AI_INTERVAL:-120}
+      SECGUARD_AI_BATCH: ${SECGUARD_AI_BATCH:-10}
+      SECGUARD_AI_MIN_CONFIDENCE: ${SECGUARD_AI_MIN_CONFIDENCE:-0.6}
+      SECGUARD_AI_RPM: ${SECGUARD_AI_RPM:-10}
+      SECGUARD_LLM_PROVIDER: ${SECGUARD_LLM_PROVIDER:-openai}
+      SECGUARD_LLM_BASE_URL: ${SECGUARD_LLM_BASE_URL:-https://api.deepseek.com/v1}
+      SECGUARD_LLM_MODEL: ${SECGUARD_LLM_MODEL:-deepseek-chat}
+      # 密钥从 .env 来,绝不出现在镜像或代码里
+      SECGUARD_LLM_KEY: ${SECGUARD_LLM_KEY:-}
     networks: [backend]
     # 注意:这里**不**加 ports 映射。
     # 程序信任 X-Forwarded-For 头来取真实 IP,如果直接对外暴露,

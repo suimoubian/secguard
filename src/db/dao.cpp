@@ -403,4 +403,189 @@ std::vector<AuditLogRow> Dao::recent_blocked(const std::string& ip, int limit) {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// W6:AI 分析层用的读写
+// ---------------------------------------------------------------------------
+
+// 这些 rule_hit 是"策略性拦截",不是攻击特征命中:
+// 限流、被封禁、登录失败、重放 —— 它们已经说明问题了,
+// 再送 LLM 判断一遍纯属浪费钱。
+std::vector<AuditLogRow> Dao::fetch_unanalyzed(int limit, int lookback_hours) {
+    std::vector<AuditLogRow> out;
+    auto lease = pool_.acquire();
+    if (!lease) return out;
+    try {
+        if (limit <= 0 || limit > 200) limit = 10;
+        if (lookback_hours <= 0 || lookback_hours > 24 * 30) lookback_hours = 24;
+
+        // 走 idx_analyzed (analyzed, created_at):先按 analyzed 过滤,再按时间
+        std::unique_ptr<sql::PreparedStatement> ps(lease->prepareStatement(
+            "SELECT id, trace_id, ip, user_id, uri, method, params_digest, rule_hit, "
+            "matched_len, action, status_code, cost_us, created_at "
+            "FROM audit_log "
+            "WHERE analyzed = 0 "
+            "  AND action = 'BLOCK' "
+            "  AND rule_hit IS NOT NULL AND rule_hit <> '' "
+            "  AND rule_hit NOT IN ('RATE_LIMITED','IP_BANNED','LOGIN_FAIL',"
+            "                       'REPLAY_MISSING_HEADERS','REPLAY_STALE','REPLAY_DUPLICATE') "
+            "  AND created_at >= (NOW() - INTERVAL ? HOUR) "
+            "ORDER BY id DESC LIMIT ?"));
+        ps->setInt(1, lookback_hours);
+        ps->setInt(2, limit);
+        std::unique_ptr<sql::ResultSet> rs(ps->executeQuery());
+        while (rs->next()) {
+            AuditLogRow r;
+            r.id            = col_i64(rs.get(), "id");
+            r.trace_id      = col_str(rs.get(), "trace_id");
+            r.ip            = col_str(rs.get(), "ip");
+            if (!rs->isNull("user_id")) r.user_id = rs->getInt64("user_id");
+            r.uri           = col_str(rs.get(), "uri");
+            r.method        = col_str(rs.get(), "method");
+            r.params_digest = col_str(rs.get(), "params_digest");
+            r.rule_hit      = col_str(rs.get(), "rule_hit");
+            r.matched_len   = col_int(rs.get(), "matched_len");
+            r.action        = col_str(rs.get(), "action");
+            r.status_code   = col_int(rs.get(), "status_code");
+            r.cost_us       = col_i64(rs.get(), "cost_us");
+            r.created_at    = col_str(rs.get(), "created_at");
+            out.push_back(std::move(r));
+        }
+    } catch (const sql::SQLException& e) {
+        LOG_ERROR(kTag, "fetch_unanalyzed 失败 code=", e.getErrorCode(),
+                  " what=", e.what());
+    }
+    return out;
+}
+
+bool Dao::mark_analyzed(const std::vector<std::int64_t>& ids) {
+    if (ids.empty()) return true;
+    auto lease = pool_.acquire();
+    if (!lease) return false;
+    try {
+        // 一条 UPDATE 改一批:避免逐条 round-trip
+        std::string sql = "UPDATE audit_log SET analyzed = 1 WHERE id IN (";
+        for (std::size_t i = 0; i < ids.size(); ++i) {
+            if (i) sql += ',';
+            sql += '?';
+        }
+        sql += ')';
+        std::unique_ptr<sql::PreparedStatement> ps(lease->prepareStatement(sql));
+        for (std::size_t i = 0; i < ids.size(); ++i) {
+            ps->setInt64(static_cast<unsigned int>(i + 1), ids[i]);
+        }
+        ps->executeUpdate();
+        return true;
+    } catch (const sql::SQLException& e) {
+        LOG_ERROR(kTag, "mark_analyzed 失败 code=", e.getErrorCode(),
+                  " what=", e.what());
+        return false;
+    }
+}
+
+WriteResult Dao::insert_alert(const AlertRow& alert, std::int64_t& new_id) {
+    auto lease = pool_.acquire();
+    if (!lease) return WriteResult::kError;
+    try {
+        std::unique_ptr<sql::PreparedStatement> ps(lease->prepareStatement(
+            "INSERT INTO alert (ip, threat_type, severity, confidence, reasoning, "
+            "log_ids, status) VALUES (?, ?, ?, ?, ?, ?, ?)"));
+        ps->setString(1, alert.ip);
+        ps->setString(2, alert.threat_type);
+        ps->setString(3, alert.severity);
+        ps->setDouble(4, alert.confidence);
+        ps->setString(5, alert.reasoning);
+        if (alert.log_ids.empty()) ps->setNull(6, sql::DataType::VARCHAR);
+        else                      ps->setString(6, alert.log_ids);
+        ps->setInt(7, alert.status);
+        ps->executeUpdate();
+
+        std::unique_ptr<sql::Statement> st(lease->createStatement());
+        std::unique_ptr<sql::ResultSet> rs(st->executeQuery("SELECT LAST_INSERT_ID()"));
+        if (rs->next()) new_id = rs->getInt64(1);
+        return WriteResult::kOk;
+    } catch (const sql::SQLException& e) {
+        if (e.getErrorCode() == kErrDeadlock) return WriteResult::kDeadlock;
+        LOG_ERROR(kTag, "insert_alert 失败 code=", e.getErrorCode(), " what=", e.what());
+        return WriteResult::kError;
+    }
+}
+
+std::vector<AlertRow> Dao::list_alerts(int limit, int offset) {
+    std::vector<AlertRow> out;
+    auto lease = pool_.acquire();
+    if (!lease) return out;
+    try {
+        if (limit <= 0 || limit > 200) limit = 20;
+        if (offset < 0) offset = 0;
+        std::unique_ptr<sql::PreparedStatement> ps(lease->prepareStatement(
+            "SELECT id, ip, threat_type, severity, confidence, reasoning, log_ids, "
+            "status, created_at FROM alert "
+            "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"));
+        ps->setInt(1, limit);
+        ps->setInt(2, offset);
+        std::unique_ptr<sql::ResultSet> rs(ps->executeQuery());
+        while (rs->next()) {
+            AlertRow a;
+            a.id          = col_i64(rs.get(), "id");
+            a.ip          = col_str(rs.get(), "ip");
+            a.threat_type = col_str(rs.get(), "threat_type");
+            a.severity    = col_str(rs.get(), "severity");
+            a.confidence  = rs->isNull("confidence") ? 0.0 : rs->getDouble("confidence");
+            a.reasoning   = col_str(rs.get(), "reasoning");
+            a.log_ids     = col_str(rs.get(), "log_ids");
+            a.status      = col_int(rs.get(), "status");
+            a.created_at  = col_str(rs.get(), "created_at");
+            out.push_back(std::move(a));
+        }
+    } catch (const sql::SQLException& e) {
+        LOG_ERROR(kTag, "list_alerts 失败 code=", e.getErrorCode(), " what=", e.what());
+    }
+    return out;
+}
+
+AlertStats Dao::alert_stats() {
+    AlertStats s;
+    auto lease = pool_.acquire();
+    if (!lease) return s;
+    try {
+        std::unique_ptr<sql::Statement> st(lease->createStatement());
+        std::unique_ptr<sql::ResultSet> rs(st->executeQuery(
+            "SELECT COUNT(*) AS total, "
+            "SUM(status = 0) AS pending, "
+            "SUM(status = 1) AS confirmed, "
+            "SUM(status = 2) AS fp, "
+            "SUM(severity = 'CRITICAL') AS critical, "
+            "SUM(severity = 'HIGH') AS high FROM alert"));
+        if (rs->next()) {
+            s.total          = col_i64(rs.get(), "total");
+            s.pending        = col_i64(rs.get(), "pending");
+            s.confirmed      = col_i64(rs.get(), "confirmed");
+            s.false_positive = col_i64(rs.get(), "fp");
+            s.critical       = col_i64(rs.get(), "critical");
+            s.high           = col_i64(rs.get(), "high");
+        }
+    } catch (const sql::SQLException& e) {
+        LOG_ERROR(kTag, "alert_stats 失败 code=", e.getErrorCode(), " what=", e.what());
+    }
+    return s;
+}
+
+WriteResult Dao::set_alert_status(std::int64_t id, int status) {
+    if (status < 0 || status > 2) return WriteResult::kError;
+    auto lease = pool_.acquire();
+    if (!lease) return WriteResult::kError;
+    try {
+        std::unique_ptr<sql::PreparedStatement> ps(lease->prepareStatement(
+            "UPDATE alert SET status = ? WHERE id = ?"));
+        ps->setInt(1, status);
+        ps->setInt64(2, id);
+        const int n = ps->executeUpdate();
+        return n > 0 ? WriteResult::kOk : WriteResult::kError;
+    } catch (const sql::SQLException& e) {
+        LOG_ERROR(kTag, "set_alert_status 失败 code=", e.getErrorCode(),
+                  " what=", e.what());
+        return WriteResult::kError;
+    }
+}
+
 }  // namespace secguard

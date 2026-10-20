@@ -33,6 +33,16 @@ message(STATUS "MySQL Connector/C++: ${MYSQLCPPCONN_LIBRARY}")
 # OpenSSL(随机数、SHA-256/HMAC、PBKDF2)
 find_package(OpenSSL REQUIRED)
 
+# libcurl:LLM API 调用(W6)
+find_path(CURL_INCLUDE_DIR NAMES curl/curl.h
+          PATHS /usr/include/x86_64-linux-gnu /usr/include /usr/local/include)
+find_library(CURL_LIBRARY NAMES curl PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib)
+if(CURL_INCLUDE_DIR AND CURL_LIBRARY)
+    message(STATUS "libcurl: ${CURL_LIBRARY}")
+else()
+    message(WARNING "找不到 libcurl —— AI 分析层将无法编译")
+endif()
+
 # hiredis:Redis 客户端(限流 / 封禁 / 重放的共享状态)
 find_path(HIREDIS_INCLUDE_DIR NAMES hiredis/hiredis.h PATHS /usr/include /usr/local/include)
 find_library(HIREDIS_LIBRARY NAMES hiredis PATHS /usr/lib/x86_64-linux-gnu /usr/local/lib)
@@ -49,7 +59,8 @@ set(SG_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
-    ${MYSQLCPPCONN_INCLUDE_DIR})
+    ${MYSQLCPPCONN_INCLUDE_DIR}
+    ${CURL_INCLUDE_DIR})
 
 # 引擎源文件 + 它依赖的日志模块(engine.cpp 里会用日志报建表信息)
 set(SG_ENGINE_SOURCES "")
@@ -73,6 +84,9 @@ set(SG_APP_SOURCES
     src/cache/distributed_guard.cpp
     src/crypto/auth_crypto.cpp
     src/engine/engine.cpp
+    src/ai/llm_client.cpp
+    src/ai/prompt.cpp
+    src/ai/analyzer.cpp
     src/net/app_context.cpp
     src/net/http_server.cpp
     src/net/handlers_auth.cpp
@@ -111,9 +125,15 @@ add_executable(unit_test
     src/engine/engine.cpp
     src/net/app_context.cpp
     src/cache/redis_client.cpp
-    src/cache/distributed_guard.cpp)
+    src/cache/distributed_guard.cpp
+    src/ai/prompt.cpp
+    src/ai/llm_client.cpp)
 target_include_directories(unit_test PRIVATE ${SG_INCLUDE_DIRS})
-target_link_libraries(unit_test PRIVATE Threads::Threads OpenSSL::Crypto ${HIREDIS_LIBRARY})
+target_link_libraries(unit_test PRIVATE
+    Threads::Threads
+    OpenSSL::Crypto
+    ${HIREDIS_LIBRARY}
+    ${CURL_LIBRARY})
 
 # ---------------------------------------------------------------------------
 # 4) 主程序
@@ -125,6 +145,7 @@ if(SG_APP_SOURCES_EXISTING)
         Threads::Threads
         ${MYSQLCPPCONN_LIBRARY}
         ${HIREDIS_LIBRARY}
+        ${CURL_LIBRARY}
         OpenSSL::SSL
         OpenSSL::Crypto)
 endif()

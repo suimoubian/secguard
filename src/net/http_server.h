@@ -37,9 +37,17 @@ struct ScanRecord {
     std::int64_t user_id = 0;       // 0 表示未登录
 };
 
-// 限流 / 封禁 / 检测。返回 true 放行;false 表示已拦下(response 已写好)
+// 限流 / 封禁 / 重放 / 特征匹配。返回 true 放行;false 表示已拦下(response 已写好)
+//
+// 注意执行位置:它由 set_pre_routing_handler 在**路由匹配之前**调用。
+// 这样未注册的路径(扫描器常打的 /admin、/.env 之类)也会被检测、也会留审计,
+// 而不是静默 404 —— 那是 WAF 最容易被绕过的地方。
 bool run_guard(AppContext& ctx, const httplib::Request& req,
                httplib::Response& res, ScanRecord& rec);
+
+// 当前请求的检测记录(由前置钩子填好,处理器只读)。
+// 每个工作线程同一时刻只处理一个请求,所以 thread_local 是安全的。
+[[nodiscard]] ScanRecord& current_scan();
 
 void record_audit(AppContext& ctx, const ScanRecord& rec);
 

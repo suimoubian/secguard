@@ -32,6 +32,17 @@ void json_err(httplib::Response& res, int status, const std::string& message) {
 }
 
 // ---------------------------------------------------------------------------
+// 当前请求的检测记录
+//
+// 为什么用 thread_local 而不是往 Request 里塞:
+//   httplib 的 Request 没有留给中间件的字段。每个工作线程同一时刻只处理
+//   一个请求,所以"线程局部的当前记录"是安全的,也不需要加锁。
+// ---------------------------------------------------------------------------
+static thread_local ScanRecord t_scan;
+
+ScanRecord& current_scan() { return t_scan; }
+
+// ---------------------------------------------------------------------------
 // 取真实 IP
 //
 // 只有配置里显式打开 trust_proxy 时才看 X-Forwarded-For。
@@ -309,9 +320,8 @@ static void register_core_routes(httplib::Server& svr, AppContext& ctx) {
     // 前端页面:一个查询框 + 结果
     // 注意:这一条也要过检测 —— 所有路由都该被检测,不能只护 /api/*。
     // (踩过这个坑:只把 /api/* 接进引擎,首面就成了没设防的入口。)
-    svr.Get("/", [&ctx](const httplib::Request& req, httplib::Response& res) {
-        ScanRecord rec;
-        if (!run_guard(ctx, req, res, rec)) return;   // 命中攻击直接拦在这里
+    svr.Get("/", [&ctx](const httplib::Request&, httplib::Response& res) {
+        ScanRecord& rec = current_scan();
         rec.status_code = 200;
         record_audit(ctx, rec);
 
@@ -339,9 +349,8 @@ static void register_core_routes(httplib::Server& svr, AppContext& ctx) {
     });
 
     // 检测接口:只做检测,不落业务数据
-    svr.Post("/api/check", [&ctx](const httplib::Request& req, httplib::Response& res) {
-        ScanRecord rec;
-        if (!run_guard(ctx, req, res, rec)) return;
+    svr.Post("/api/check", [&ctx](const httplib::Request&, httplib::Response& res) {
+        ScanRecord& rec = current_scan();
 
         const auto t0 = std::chrono::steady_clock::now();
         nlohmann::json j;
@@ -359,10 +368,49 @@ static void register_core_routes(httplib::Server& svr, AppContext& ctx) {
 }
 
 void register_routes(httplib::Server& svr, AppContext& ctx) {
+    // -----------------------------------------------------------------------
+    // 前置钩子:所有请求的检测都在这里做(第 37 讲)
+    //
+    // 位置很关键 —— 它在路由匹配**之前**执行。这一点决定了:
+    //   1. 未注册的路径(扫描器最爱打的 /admin、/.env、/wp-login.php)
+    //      也会被特征匹配、也会留审计,而不是静默 404 什么都不留
+    //   2. 检测逻辑只写一遍,不用每个处理器开头各抄一遍
+    //      (抄 N 遍的后果是:新加一个接口忘了抄,那个接口就是没设防的)
+    //
+    // 返回 Handled 表示已拦下,请求不会再进业务逻辑。
+    // -----------------------------------------------------------------------
+    svr.set_pre_routing_handler(
+        [&ctx](const httplib::Request& req, httplib::Response& res) {
+            // 每个请求都从干净的记录开始(同一线程会复用这块存储)
+            t_scan = ScanRecord{};
+            if (run_guard(ctx, req, res, t_scan)) {
+                return httplib::Server::HandlerResponse::Unhandled;  // 放行,继续路由
+            }
+            return httplib::Server::HandlerResponse::Handled;        // 已拦下
+        });
+
+    // 真实路由必须先注册:httplib 取第一个匹配的 pattern,
+    // 兜底的 .* 若排在前面会把所有接口吃掉。
     register_core_routes(svr, ctx);
     register_auth_routes(svr, ctx);
     register_content_routes(svr, ctx);
     register_audit_routes(svr, ctx);
+
+    // 兜底:没匹配到任何路由(404)。
+    // 有了上面的前置钩子,这些请求已经过检测、也已经写了审计,
+    // 所以这里只需把状态码记进审计再返回。
+    // (扫描器探测 /admin、/.env 这类路径时,正是走这里。)
+    auto fallback = [&ctx](const httplib::Request&, httplib::Response& res) {
+        ScanRecord& rec = current_scan();
+        rec.status_code = 404;
+        record_audit(ctx, rec);
+        json_err(res, 404, "没有这个接口");
+    };
+    svr.Get(R"(.*)", fallback);
+    svr.Post(R"(.*)", fallback);
+    svr.Put(R"(.*)", fallback);
+    svr.Delete(R"(.*)", fallback);
+    svr.Patch(R"(.*)", fallback);
 }
 
 }  // namespace secguard
