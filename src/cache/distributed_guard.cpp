@@ -11,16 +11,25 @@ namespace {
 constexpr const char* kTag = "[分布式防护] ";
 
 // ---------------------------------------------------------------------------
-// Lua:令牌桶(寓言集第 39 讲)
+// Lua:封禁检查 + 令牌桶,一次往返(寓言集第 39、41 讲)
 //
-// 为什么写成一句话交给 Redis 念:出问题的从来不是"看"和"取"各自对不对,
-// 而是这两步中间被人插了一脚。整段 read-modify-write 必须原子。
+// 为什么把两件事合进一个脚本:
+//   压测发现每请求两次 Redis 往返就是吞吐瓶颈(2 核上 26k,关掉 Redis 能到 70k)。
+//   合并成一次 EVAL,既省一半往返,又省一次连接借还。
+//   顺便:先判封禁,封着的请求连令牌都不用算。
 //
-// KEYS[1] 桶的 key
-// ARGV[1] rate(每秒补几个)  ARGV[2] capacity  ARGV[3] now_us  ARGV[4] cost
-// 返回 1 = 放行,0 = 限流
+// 为什么用 Lua:"看"和"取"之间会被别人插一脚,整段必须原子。
+//
+// KEYS[1] 桶   KEYS[2] 封禁键
+// ARGV[1] rate ARGV[2] capacity ARGV[3] now_us ARGV[4] cost
+// 返回 -1 = 封禁中,0 = 限流,1 = 放行
 // ---------------------------------------------------------------------------
-const char* kTokenBucketLua = R"LUA(
+const char* kGuardLua = R"LUA(
+-- 先看封没封。封禁是"硬状态",不必再算令牌。
+if redis.call('EXISTS', KEYS[2]) == 1 then
+  return -1
+end
+
 local rate     = tonumber(ARGV[1])
 local capacity = tonumber(ARGV[2])
 local now      = tonumber(ARGV[3])
@@ -120,34 +129,54 @@ double DistributedGuard::now_sec() {
 }
 
 // ---------------------------------------------------------------------------
-// 限流
+// 封禁 + 限流(一次 Redis 往返)
 // ---------------------------------------------------------------------------
-bool DistributedGuard::allow(const std::string& key_suffix) {
+GuardDecision DistributedGuard::check(const std::string& key_suffix) {
     if (!redis_ || !redis_->available()) {
         std::lock_guard<std::mutex> lk(mu_);
         ++fallback_count_;
-        return allow_local(key_suffix);
+        return check_local(key_suffix);
     }
 
     const auto now_us = static_cast<std::int64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
 
-    const std::vector<std::string> keys = {"sg:rl:" + key_suffix};
+    const std::vector<std::string> keys = {
+        "sg:rl:" + key_suffix,
+        "sg:ban:" + key_suffix,
+    };
     const std::vector<std::string> args = {
         std::to_string(cfg_.rate_per_sec),
         std::to_string(cfg_.burst),
         std::to_string(now_us),
         "1"};
 
-    const auto v = redis_->eval_int(kTokenBucketLua, keys, args);
+    const auto v = redis_->eval_int(kGuardLua, keys, args);
     if (!v) {
         // Redis 出错:降级到本地,不把请求卡死
         std::lock_guard<std::mutex> lk(mu_);
         ++fallback_count_;
-        return allow_local(key_suffix);
+        return check_local(key_suffix);
     }
-    return *v == 1;
+    if (*v < 0) return GuardDecision::kBanned;
+    return (*v == 1) ? GuardDecision::kAllow : GuardDecision::kRateLimited;
+}
+
+bool DistributedGuard::allow(const std::string& key_suffix) {
+    return check(key_suffix) == GuardDecision::kAllow;
+}
+
+// 降级路径:同样先看封禁,再算令牌
+GuardDecision DistributedGuard::check_local(const std::string& key_suffix) {
+    // 调用方已持锁
+    const double now = now_sec();
+    auto it = local_ips_.find(key_suffix);
+    if (it != local_ips_.end() && it->second.banned_until > now) {
+        return GuardDecision::kBanned;
+    }
+    return allow_local(key_suffix) ? GuardDecision::kAllow
+                                   : GuardDecision::kRateLimited;
 }
 
 bool DistributedGuard::allow_local(const std::string& key_suffix) {

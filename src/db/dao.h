@@ -140,6 +140,14 @@ public:
     // 人工改告警状态(1 已确认 / 2 误报)
     WriteResult set_alert_status(std::int64_t id, int status);
 
+    // 清理过期的审计记录。返回本次删除行数。
+    // 分批删(带 LIMIT),避免一个巨型 DELETE 把库锁住、把 IO 打满。
+    // days <= 0 表示不清理。
+    int purge_audit_before(int days, int batch_limit);
+
+    // 审计表当前行数(保留策略的日志要用)
+    [[nodiscard]] std::int64_t audit_row_count();
+
     // 连通性自检,给 /health 用
     [[nodiscard]] bool ping();
 

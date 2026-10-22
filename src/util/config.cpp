@@ -122,6 +122,11 @@ bool Config::load(Config& out, std::string& err) {
     if (!env_size("SECGUARD_AUDIT_BATCH", out.audit.batch_size)) { err = "SECGUARD_AUDIT_BATCH 不是整数"; return false; }
     if (!env_int("SECGUARD_AUDIT_FLUSH_MS", out.audit.flush_interval_ms)) { err = "SECGUARD_AUDIT_FLUSH_MS 不是整数"; return false; }
     if (out.audit.batch_size == 0) { err = "SECGUARD_AUDIT_BATCH 必须为正"; return false; }
+    if (!env_int("SECGUARD_AUDIT_RETENTION_DAYS", out.audit.retention_days)) { err = "SECGUARD_AUDIT_RETENTION_DAYS 不是整数"; return false; }
+    if (out.audit.retention_days < 0 || out.audit.retention_days > 3650) {
+        err = "SECGUARD_AUDIT_RETENTION_DAYS 必须在 0~3650 之间";
+        return false;
+    }
 
     // --- LLM(第 61 讲):密钥只从环境变量来,不设默认值 ---
     out.llm.provider = env_str("SECGUARD_LLM_PROVIDER", out.llm.provider);

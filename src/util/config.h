@@ -81,6 +81,9 @@ struct AuditConfig {
     std::size_t batch_size = 500;      // 攒够多少条写一次
     int         flush_interval_ms = 1000;  // 或满多久写一次
     bool        async = true;          // false = 退回同步写库(便于对比)
+    // 保留天数。审计表会无限增长 —— 压测跑了 3 分钟就写了 320 万条、占了 584MB。
+    // 0 表示不清理(交给外部定时任务),默认 7 天。
+    int         retention_days = 7;
 };
 
 // AI 分析层(第 59~63 讲)

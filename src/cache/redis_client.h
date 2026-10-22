@@ -15,6 +15,7 @@
 // 降级原则:Redis 不可用时不能把服务搞哑,退回单机内存版并记日志。
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -59,9 +60,12 @@ public:
                                          const std::vector<std::string>& args);
 
     [[nodiscard]] bool ping();
-    [[nodiscard]] bool available() const { return available_; }
-    [[nodiscard]] long long failures() const { return failures_; }
-    [[nodiscard]] long long commands() const { return commands_; }
+    [[nodiscard]] bool available() const { return available_.load(); }
+    [[nodiscard]] long long failures() const { return failures_.load(); }
+    [[nodiscard]] long long commands() const { return commands_.load(); }
+
+    // 内部实现细节,公开只是为了能在 .cpp 里声明 thread_local 变量
+    struct TlsSlot;
 
 private:
     struct Conn;
@@ -72,9 +76,11 @@ private:
     RedisConfig cfg_;
     std::mutex mu_;
     std::vector<std::unique_ptr<Conn>> idle_;
-    bool available_ = false;
-    long long failures_ = 0;
-    long long commands_ = 0;
+    // 统计用原子计数:热路径上只做 fetch_add(relaxed),
+    // 比抢一把全局锁便宜得多,而且依然精确
+    std::atomic<bool> available_{false};
+    std::atomic<long long> failures_{0};
+    std::atomic<long long> commands_{0};
     // 脚本缓存:script -> sha1
     std::vector<std::pair<std::string, std::string>> script_shas_;
 };

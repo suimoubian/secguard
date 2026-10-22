@@ -21,12 +21,26 @@
 
 namespace secguard {
 
+// 一次请求的放行判定
+enum class GuardDecision {
+    kAllow,
+    kRateLimited,
+    kBanned,
+};
+
 class DistributedGuard {
 public:
     DistributedGuard(RedisClient* redis, const GuardConfig& cfg);
 
-    // ---- 限流:令牌桶 ----
-    // 返回 true 表示放行。key_suffix 可用于按用户/IP 分别限流(空 = 全局)。
+    // ---- 封禁 + 限流:一次 Redis 往返搞定 ----
+    //
+    // 为什么合并:原来封禁检查一次、令牌桶一次,每请求两次往返。
+    // 压测显示这两次往返就是吞吐瓶颈(2 核上 26k vs 关掉 Redis 70k)。
+    // 封禁检查可以直接放进 token bucket 的 Lua 里,反正都是 read-only,
+    // 而且"先看封没封,封着就不必再算令牌"本身也更省。
+    GuardDecision check(const std::string& key_suffix);
+
+    // 兼容接口:只要"放不放行"的结论
     bool allow(const std::string& key_suffix);
 
     // ---- IP 封禁:滑动窗口计数 ----
@@ -58,6 +72,7 @@ private:
     };
 
     bool allow_local(const std::string& key_suffix);
+    GuardDecision check_local(const std::string& key_suffix);
     [[nodiscard]] static double now_sec();
 
     RedisClient* redis_ = nullptr;

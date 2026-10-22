@@ -190,17 +190,31 @@ int main() {
              "  线程数=", cfg.server.threads);
 
     // ---- 7. 后台线程 ----
-    // 7a. 停机哨兵:收到信号就停服,并定期剔除失效连接
+    // 7a. 停机哨兵 + 运维巡检:连接池探活、审计日志保留策略
     std::thread reaper([&] {
         int tick = 0;
         while (!g_stop_requested.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            if (++tick % 60 == 0) {
+            ++tick;
+
+            if (tick % 60 == 0) {
                 pool->health_check();
                 LOG_DEBUG(kTag, "连接池巡检:total=", pool->total_count(),
                           " idle=", pool->idle_count(),
                           " 建连=", pool->create_count(),
                           " 复用=", pool->reuse_count());
+            }
+
+            // 保留策略:启动 30 秒后先跑一次(补上停机期间攒下的旧数据),
+            // 之后每 10 分钟一次。每次只删一批,剩下的留给下一轮,
+            // 免得一直占着连接和 IO。
+            if (cfg.audit.retention_days > 0
+                && (tick == 60 || tick % 1200 == 0)) {
+                const int n = dao.purge_audit_before(cfg.audit.retention_days, 10000);
+                if (n > 0) {
+                    LOG_INFO(kTag, "审计保留策略:删除 ", n, " 条超过 ",
+                             cfg.audit.retention_days, " 天的记录");
+                }
             }
         }
         LOG_INFO(kTag, "收到停止信号,停止接受新请求");

@@ -86,34 +86,42 @@ bool run_guard(AppContext& ctx, const httplib::Request& req,
 
     ctx.requests_total.fetch_add(1);
 
-    // 1) 封禁检查(第 41 讲)。状态在 Redis,多实例共享:
-    //    在 A 实例上被封,换 B 实例也进不来。
-    if (ctx.guard->is_banned(rec.ip)) {
-        rec.action = "BLOCK";
-        rec.rule_hit = "IP_BANNED";
-        rec.status_code = 403;
-        rec.was_banned = true;
-        ctx.requests_blocked.fetch_add(1);
-        json_err(res, 403, "IP 已被临时封禁");
-        const auto t1 = std::chrono::steady_clock::now();
-        rec.cost_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-        record_audit(ctx, rec);
-        return false;
-    }
+    // 1) 封禁 + 限流:合成一次 Redis 往返(第 38、41 讲)
+    //
+    // 原来拆成两步:先 EXISTS 查封禁,再 EVAL 取令牌 —— 每请求两次往返。
+    // 压测显示这两次往返就是吞吐瓶颈(2 核上 26k;关掉 Redis 能到 70k)。
+    // 现在封禁检查进了令牌桶的 Lua,一次 EVAL 出结论。
+    switch (ctx.guard->check(rec.ip)) {
+        case GuardDecision::kBanned:
+            rec.action = "BLOCK";
+            rec.rule_hit = "IP_BANNED";
+            rec.status_code = 403;
+            rec.was_banned = true;
+            ctx.requests_blocked.fetch_add(1);
+            json_err(res, 403, "IP 已被临时封禁");
+            {
+                const auto t1 = std::chrono::steady_clock::now();
+                rec.cost_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+            }
+            record_audit(ctx, rec);
+            return false;
 
-    // 2) 令牌桶限流(第 38 讲)。桶在 Redis 里,多实例共享同一份令牌。
-    //    空 suffix = 全局桶;要按 IP 分开限流就传 IP。
-    if (!ctx.guard->allow(rec.ip)) {
-        rec.action = "BLOCK";
-        rec.rule_hit = "RATE_LIMITED";
-        rec.status_code = 429;
-        rec.rate_limited = true;
-        ctx.requests_blocked.fetch_add(1);
-        json_err(res, 429, "请求过于频繁,请稍后再试");
-        const auto t1 = std::chrono::steady_clock::now();
-        rec.cost_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-        record_audit(ctx, rec);
-        return false;
+        case GuardDecision::kRateLimited:
+            rec.action = "BLOCK";
+            rec.rule_hit = "RATE_LIMITED";
+            rec.status_code = 429;
+            rec.rate_limited = true;
+            ctx.requests_blocked.fetch_add(1);
+            json_err(res, 429, "请求过于频繁,请稍后再试");
+            {
+                const auto t1 = std::chrono::steady_clock::now();
+                rec.cost_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+            }
+            record_audit(ctx, rec);
+            return false;
+
+        case GuardDecision::kAllow:
+            break;
     }
 
     // 3) 重放防护(第 40 讲):时间戳 + nonce

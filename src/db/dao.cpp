@@ -588,4 +588,49 @@ WriteResult Dao::set_alert_status(std::int64_t id, int status) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 审计保留策略
+//
+// 为什么必须有:审计表是"每请求一行",只会涨。压测跑了 3 分钟就写了 320 万行、
+// 占 584MB。没有清理策略的审计表迟早把磁盘吃光,而且删不动(索引膨胀)。
+//
+// 为什么分批删:一条 DELETE 删几百万行会长时间持锁、把 IO 打满,
+// 线上表现就是"服务突然变慢"。带 LIMIT 一批批删,对线上几乎无感。
+// ---------------------------------------------------------------------------
+int Dao::purge_audit_before(int days, int batch_limit) {
+    if (days <= 0) return 0;
+    if (batch_limit <= 0 || batch_limit > 100000) batch_limit = 10000;
+
+    auto lease = pool_.acquire();
+    if (!lease) return 0;
+    try {
+        std::unique_ptr<sql::PreparedStatement> ps(lease->prepareStatement(
+            "DELETE FROM audit_log "
+            "WHERE created_at < (NOW() - INTERVAL ? DAY) "
+            "LIMIT ?"));
+        ps->setInt(1, days);
+        ps->setInt(2, batch_limit);
+        return ps->executeUpdate();
+    } catch (const sql::SQLException& e) {
+        LOG_ERROR(kTag, "purge_audit_before 失败 code=", e.getErrorCode(),
+                  " what=", e.what());
+        return 0;
+    }
+}
+
+std::int64_t Dao::audit_row_count() {
+    auto lease = pool_.acquire();
+    if (!lease) return -1;
+    try {
+        std::unique_ptr<sql::Statement> st(lease->createStatement());
+        std::unique_ptr<sql::ResultSet> rs(st->executeQuery(
+            "SELECT COUNT(*) AS n FROM audit_log"));
+        return rs->next() ? rs->getInt64("n") : -1;
+    } catch (const sql::SQLException& e) {
+        LOG_ERROR(kTag, "audit_row_count 失败 code=", e.getErrorCode(),
+                  " what=", e.what());
+        return -1;
+    }
+}
+
 }  // namespace secguard

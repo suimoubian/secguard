@@ -3,12 +3,42 @@
 #include <hiredis/hiredis.h>
 
 #include <cstring>
+#include <mutex>
+#include <unordered_set>
 
 #include "util/log.h"
 
 namespace secguard {
 namespace {
 constexpr const char* kTag = "[Redis] ";
+
+// ---------------------------------------------------------------------------
+// 存活客户端登记表
+//
+// 解决一个真实的坑:线程局部缓存的连接由 thread_local 的析构函数归还,
+// 但 TLS 析构发生在线程退出时 —— 如果 RedisClient 此时已经销毁,
+// 归还动作就会去锁一个已销毁的 mutex,直接死锁。
+// (单元测试里主线程同时持有两者,一跑就卡在 futex_do_wait。)
+//
+// 所以析构前先从登记表里摘掉自己,TLS 析构时先查表:
+// 查不到就说明客户端已经没了,直接把连接丢掉即可(它的析构会 redisFree)。
+// ---------------------------------------------------------------------------
+std::mutex g_alive_mu;
+std::unordered_set<const void*> g_alive_clients;
+
+void mark_client_alive(const void* p) {
+    std::lock_guard<std::mutex> lk(g_alive_mu);
+    g_alive_clients.insert(p);
+}
+void mark_client_dead(const void* p) {
+    std::lock_guard<std::mutex> lk(g_alive_mu);
+    g_alive_clients.erase(p);
+}
+bool client_still_alive(const void* p) {
+    std::lock_guard<std::mutex> lk(g_alive_mu);
+    return g_alive_clients.count(p) > 0;
+}
+
 }  // namespace
 
 struct RedisClient::Conn {
@@ -22,6 +52,7 @@ struct RedisClient::Conn {
 };
 
 RedisClient::RedisClient(const RedisConfig& cfg) : cfg_(cfg) {
+    mark_client_alive(this);
     if (!cfg_.enabled) {
         LOG_INFO(kTag, "未启用(配置里关掉了)");
         return;
@@ -37,6 +68,9 @@ RedisClient::RedisClient(const RedisConfig& cfg) : cfg_(cfg) {
 }
 
 RedisClient::~RedisClient() {
+    // 先摘牌,再动自己的成员 —— 顺序很重要:
+    // 摘牌之后到达的 TLS 析构就不会再调到这里。
+    mark_client_dead(this);
     std::lock_guard<std::mutex> lk(mu_);
     idle_.clear();          // Conn 的析构会 redisFree
 }
@@ -98,16 +132,51 @@ void RedisClient::release(std::unique_ptr<Conn> c) {
     // 否则 c 离开作用域,Conn 析构会 redisFree,连接数自然回落
 }
 
+// ---------------------------------------------------------------------------
+// 每线程一条连接
+//
+// 压测发现:每请求一次 Redis 往返就让吞吐从 57k 掉到 20k。一次 loopback
+// 往返不该贵成这样 —— 真正贵的是 64 个工作线程抢同一把 pool 互斥锁,
+// 每次请求都要加锁两次(借、还)。
+//
+// 做法:工作线程第一次用 Redis 时领一条连接,之后一直用自己这条,
+// 热路径上完全不碰锁。线程退出时由 thread_local 的析构归还。
+// ---------------------------------------------------------------------------
+struct RedisClient::TlsSlot {
+    RedisClient* owner = nullptr;
+    std::unique_ptr<Conn> conn;
+    ~TlsSlot() {
+        // 只有在客户端还活着的时候才能归还;否则直接丢弃,
+        // 由 conn 自己的析构去 redisFree(见上面登记表的说明)
+        if (owner && conn && client_still_alive(owner)) {
+            owner->release(std::move(conn));
+        }
+    }
+};
+
+static thread_local RedisClient::TlsSlot t_redis_slot;
+
 std::optional<std::string> RedisClient::exec(const std::vector<std::string>& argv) {
     if (!cfg_.enabled || argv.empty()) return std::nullopt;
 
-    auto c = acquire();
-    if (!c) {
-        std::lock_guard<std::mutex> lk(mu_);
-        ++failures_;
-        available_ = false;
-        return std::nullopt;
+    // --- 取连接:优先用本线程缓存的,省掉两次加锁 ---
+    if (t_redis_slot.owner != this) {
+        // 换了客户端实例(理论上一进程只有一个):把旧的还掉
+        if (t_redis_slot.owner && t_redis_slot.conn) {
+            t_redis_slot.owner->release(std::move(t_redis_slot.conn));
+        }
+        t_redis_slot.owner = this;
+        t_redis_slot.conn = nullptr;
     }
+    if (!t_redis_slot.conn) {
+        t_redis_slot.conn = acquire();
+        if (!t_redis_slot.conn) {
+            failures_.fetch_add(1, std::memory_order_relaxed);
+            available_.store(false, std::memory_order_relaxed);
+            return std::nullopt;
+        }
+    }
+    Conn* c = t_redis_slot.conn.get();
 
     // 转成 redisCommandArgv 要的形式:指针数组 + 长度数组
     std::vector<const char*> cargv;
@@ -125,12 +194,11 @@ std::optional<std::string> RedisClient::exec(const std::vector<std::string>& arg
     if (!r) {
         LOG_WARN(kTag, "命令失败(连接可能已断): ",
                  c->ctx ? c->ctx->errstr : "ctx=null");
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            ++failures_;
-            available_ = false;
-        }
-        c.reset();      // 不归还坏连接
+        failures_.fetch_add(1, std::memory_order_relaxed);
+        available_.store(false, std::memory_order_relaxed);
+        // 这条连接已坏:直接销毁,别还回池子。
+        // 下次调用会重新领一条(见上面的取连接逻辑)。
+        t_redis_slot.conn.reset();
         return std::nullopt;
     }
 
@@ -156,12 +224,9 @@ std::optional<std::string> RedisClient::exec(const std::vector<std::string>& arg
     }
     freeReplyObject(static_cast<void*>(r));
 
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        ++commands_;
-        available_ = true;
-    }
-    release(std::move(c));
+    // 统计用原子计数(relaxed 就够:只是给监控看,不参与同步)
+    commands_.fetch_add(1, std::memory_order_relaxed);
+    available_.store(true, std::memory_order_relaxed);
     return out;
 }
 
