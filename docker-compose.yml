@@ -157,7 +157,11 @@ services:
     restart: unless-stopped
     depends_on:
       app:
-        condition: service_started
+        # 必须是 service_healthy 而不是 service_started。
+        # app 要等数据库就绪才绑定端口,用 service_started 的话 nginx 会先起来,
+        # 这段时间里所有请求都拿到 502 —— 用户看到的就是"打不开"。
+        # 改成等健康检查通过,nginx 一起来就能正常服务。
+        condition: service_healthy
     ports:
       - "${SECGUARD_HTTP_PORT:-80}:80"
     volumes:
