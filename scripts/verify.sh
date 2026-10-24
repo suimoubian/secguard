@@ -11,6 +11,11 @@
 # 环境变量:
 #   SG_ADMIN_USER / SG_ADMIN_PASS   管理员账号(默认 admin / admin-password-2026)
 #   SG_SKIP_ADMIN=1                 跳过管理接口相关用例
+#
+# 注意:**别和其它压测同时跑**。这个脚本自己会压一次限流(3 秒 20 连接),
+# 和 bench/run.sh 或者上一轮自检叠加起来会把 nginx 打满,
+# 表现出来是一堆 502 —— 实测踩过,查了很久才发现是自己压自己。
+# 连续跑也要等上一轮完全结束。
 
 set -u
 
@@ -349,6 +354,18 @@ for i in $(seq 1 12); do
     sleep 0.1
 done
 c=$(code "$BASE/?q=hello")
+# 偶发:上一步压测把令牌桶打空后,前面几次攻击可能拿到 429 而没进检测,
+# 命中次数没凑够阈值。多试几轮,别让"限流"和"封禁"互相干扰导致的偶发
+# 表现成功能缺失。
+tries=0
+while [ "$c" != "403" ] && [ "$tries" -lt 3 ]; do
+    tries=$((tries+1))
+    for i in $(seq 1 5); do
+        curl -s -o /dev/null "$BASE/?q=union%20select%201" 2>/dev/null
+        sleep 0.15
+    done
+    c=$(code "$BASE/?q=hello")
+done
 if [ "$c" = "403" ]; then
     ok "自动封禁生效(正常请求也被拦了)"
     echo "        解除封禁..."
