@@ -34,8 +34,23 @@
 | W6 | **AI 分析层**(LLM 接入、结构化输出、置信度过滤) | ✅ 完成 |
 | W7 | Docker 部署、压测 | ✅ **完成** |
 | W8 | 文档与讲稿 | ✅ **完成** |
+| W9 | 管理鉴权、白名单、告警通知、CI、DAO 测试 | ✅ **完成** |
 
-规模:**53 个文件、约 7100 行源码**,全部功能实测通过。
+规模:**60 余个文件、约 7500 行源码**,自检 49 项全过。
+
+### W9 补的四件事(都是"能不能真用"的缺口)
+
+| 事项 | 解决的问题 |
+|---|---|
+| **管理接口鉴权** | 原来 `/api/alerts`、`/api/analyze/run`、`/api/rules/reload` 全是裸的,连"把告警标成误报"都能匿名调用 —— 等于让攻击者自己删证据。现在按用户名名单鉴权,**名单为空则管理接口全关**(fail-closed) |
+| **白名单** | 正常业务内容被误拦(如技术博客正文里的 `select * from user`)。按 **(路径, 规则)** 放行,不按内容放行 —— 后者等于给攻击者一个可伪造的通行证 |
+| **告警通知** | 告警只写数据库,没人会去看。新增 webhook 推送(通用 JSON,默认只推 HIGH 及以上) |
+| **CI + DAO 测试** | 保证每次提交能编过、自检能过;DAO 层从"只有端到端覆盖"变成有独立断言 |
+
+顺带修了一个**严重的检测盲区**:原先前置钩子在读取请求体之前就执行了
+(httplib 的刻意设计),导致 **POST 请求体完全没被扫描** ——
+把 `union select` 放进 body 直接 200 放行。现在每个处理器补一次 body 检测,
+并且自检里有一组用例把**每个 POST 路由**都打一遍,漏了就红。
 
 ## 核心性能数据
 
@@ -200,13 +215,45 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 
 # 跑测试
-./build/ac_test 10000        # AC 自动机对拍
+./build/ac_test 10000        # AC 自动机对拍(与朴素实现逐位比对)
 ./build/ac_bench 2000 2048   # 性能基准
 ./build/unit_test            # 密码/JWT/引擎/队列/防护
+./build/dao_test             # DAO 层(需要数据库,连不上会自动跳过)
+
+# 一键自检(把服务跑起来后,49 项全过才说明环境是好的)
+./scripts/verify.sh
+
+# 本地模拟 CI(推送前跑一遍,省得等 CI 红了再回来改)
+./scripts/ci-local.sh
 
 # 起服务(需要 .env)
 ./run.sh
 ```
+
+### 常用脚本
+
+| 脚本 | 干什么 |
+|---|---|
+| `scripts/verify.sh` | 一键自检:攻击检测、body 检测、鉴权、审计、AI、热加载、限流封禁 |
+| `scripts/ci-local.sh` | 本地模拟 CI:干净编译、零警告、对拍、单测、基准、DAO |
+| `scripts/webhook_receiver.py` | 本地告警接收端,用来确认 webhook 真的推出来了 |
+| `bench/run.sh` | 压测(自动绑核,输出对比表) |
+| `docker/deploy.sh` | 服务器上一键部署(轮询健康检查) |
+
+### 管理接口要令牌
+
+`/api/alerts`、`/api/audit/*`、`/api/analyze/*`、`/api/rules*` 需要管理员令牌:
+
+```bash
+export BASE=http://127.0.0.1:8088
+# 管理员用户名要在 .env 的 SECGUARD_ADMIN_USERS 里
+TOKEN=$(curl -s -X POST $BASE/api/login -H 'Content-Type: application/json' \
+        -d '{"username":"admin","password":"你的密码"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+curl -H "Authorization: Bearer $TOKEN" $BASE/api/alerts
+```
+
+未配置 `SECGUARD_ADMIN_USERS` 时管理接口**全部关闭**(fail-closed),
+不会出现"忘了配等于没锁"。
 
 ## 技术栈
 

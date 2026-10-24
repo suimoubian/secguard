@@ -137,6 +137,20 @@ target_link_libraries(unit_test PRIVATE
     ${CURL_LIBRARY})
 
 # ---------------------------------------------------------------------------
+# 3b) DAO 层测试(需要数据库;连不上会自动跳过并返回成功)
+# ---------------------------------------------------------------------------
+add_executable(dao_test
+    tests/dao_test.cpp
+    src/db/dao.cpp
+    src/db/connection_pool.cpp
+    src/util/log.cpp)
+target_include_directories(dao_test PRIVATE ${SG_INCLUDE_DIRS})
+target_link_libraries(dao_test PRIVATE
+    Threads::Threads
+    ${MYSQLCPPCONN_LIBRARY}
+    OpenSSL::Crypto)
+
+# ---------------------------------------------------------------------------
 # 4) 主程序
 # ---------------------------------------------------------------------------
 if(SG_APP_SOURCES_EXISTING)

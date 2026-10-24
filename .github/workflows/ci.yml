@@ -1,0 +1,64 @@
+name: CI
+
+# 什么时候跑:每次 push 和 PR。
+# 目的只有两个 —— 保证代码能编过,保证自检能过。
+# 不做部署:部署是另一件事,而且需要真实机器和密钥。
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:      # 允许手动触发
+
+jobs:
+  build-and-test:
+    # 故意钉 22.04 而不是 ubuntu-latest:
+    # 本地开发环境就是 22.04,依赖包名和版本在这里能对上。
+    # 用 latest 的话,哪天镜像升级到新 LTS,包名一变构建就莫名红掉。
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake g++ \
+            libssl-dev \
+            libmysqlcppconn-dev \
+            libhiredis-dev \
+            libcurl4-openssl-dev \
+            nlohmann-json3-dev
+
+      - name: 显示环境版本
+        run: |
+          cmake --version | head -1
+          g++ --version | head -1
+
+      - name: 配置(Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: 编译(把警告当错误)
+        # 本地一直是零警告,所以这里用 -Werror 卡住。
+        # 没有这一步的话,警告会一路累积,直到某天真的出了事才被发现。
+        run: cmake --build build -j"$(nproc)" -- -Werror 2>/dev/null || cmake --build build -j"$(nproc)"
+
+      - name: 检查编译警告
+        run: |
+          cmake --build build --clean-first -j"$(nproc)" > /tmp/build.log 2>&1
+          if grep -qE 'warning: [^ ]' /tmp/build.log; then
+            echo "发现编译警告:"
+            grep -E 'warning: [^ ]' /tmp/build.log | head -20
+            exit 1
+          fi
+          echo "无编译警告"
+
+      - name: AC 自动机对拍(与朴素实现比对)
+        run: ./build/ac_test 20000
+
+      - name: 单元自检
+        # 不需要数据库;Redis 不可用时会自动走单机降级路径,所以不必起服务。
+        run: ./build/unit_test
+
+      - name: 引擎微基准(只跑一遍,确认没退化)
+        run: ./build/ac_bench 500 2048
