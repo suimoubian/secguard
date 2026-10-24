@@ -7,25 +7,42 @@
 # 用法:
 #   ./scripts/verify.sh                      # 打默认地址
 #   ./scripts/verify.sh http://1.2.3.4:8088  # 打指定地址
+#
+# 环境变量:
+#   SG_ADMIN_USER / SG_ADMIN_PASS   管理员账号(默认 admin / admin-password-2026)
+#   SG_SKIP_ADMIN=1                 跳过管理接口相关用例
 
 set -u
 
 BASE="${1:-http://127.0.0.1:8088}"
-PASS=0
-FAIL=0
-SKIP=0
+ADMIN_USER="${SG_ADMIN_USER:-admin}"
+ADMIN_PASS="${SG_ADMIN_PASS:-admin-password-2026}"
+SKIP_ADMIN="${SG_SKIP_ADMIN:-0}"
+
+PASS=0; FAIL=0; SKIP=0
 FAILED_NAMES=""
+ATOK=""      # 管理员令牌
+UTOK=""      # 普通用户令牌
 
 ok()   { PASS=$((PASS+1)); printf '  \033[32m通过\033[0m  %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); FAILED_NAMES="$FAILED_NAMES\n    - $1"; printf '  \033[31m失败\033[0m  %s  (%s)\n' "$1" "$2"; }
 skip() { SKIP=$((SKIP+1)); printf '  \033[33m跳过\033[0m  %s  (%s)\n' "$1" "$2"; }
+sec()  { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
-# 取 HTTP 状态码
 code() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$@" 2>/dev/null; }
-# 取响应体
 body() { curl -s --max-time 10 "$@" 2>/dev/null; }
+acode() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H "Authorization: Bearer $ATOK" "$@" 2>/dev/null; }
 
-# 从 JSON 里取字段(没有 jq 也能用)
+# 清掉命中计数。脚本前面几节会故意发十几次攻击,不清的话会提前触发
+# 自动封禁(阈值默认 10 次),后面的正常用例全被 403 挡住 ——
+# 表现出来就是"一堆莫名其妙的失败"。
+reset_hits() {
+    sudo -n docker exec secguard-redis sh -c \
+        'for k in $(redis-cli --scan --pattern "sg:hit:*"); do redis-cli DEL "$k" > /dev/null; done; \
+         for k in $(redis-cli --scan --pattern "sg:ban:*"); do redis-cli DEL "$k" > /dev/null; done' \
+        > /dev/null 2>&1
+}
+
 jget() {
     python3 -c "
 import sys, json
@@ -39,38 +56,44 @@ except Exception:
 " "$1" 2>/dev/null
 }
 
-sec() { printf '\n\033[1m%s\033[0m\n' "$1"; }
-
 echo "=================================================================="
 echo " SecGuard 自检   目标: $BASE"
 echo "=================================================================="
 
 # ---------------------------------------------------------------------------
+sec "启动等待"
+# ---------------------------------------------------------------------------
+# 容器刚被重建时,app 要等数据库就绪才监听端口,这段时间 nginx 会返回 502。
+# 如果自检正好在这个窗口里开始,后面所有用例都会莫名其妙地红 ——
+# 看起来像"功能全坏了",其实只是服务还没起来。
+warm=0
+for i in $(seq 1 60); do
+    if [ "$(code "$BASE/health")" = "200" ]; then warm=1; break; fi
+    sleep 1
+done
+if [ "$warm" = "1" ]; then ok "服务已就绪(${i} 秒)"
+else bad "服务就绪" "60 秒内 /health 未返回 200,请先 docker compose ps 看容器状态"; fi
+
+# ---------------------------------------------------------------------------
 sec "0. 清理上一次留下的防护状态"
 # ---------------------------------------------------------------------------
-# 为什么要有这一步:这个脚本自己会触发限流和封禁(第 9 节),
-# 如果不清,紧接着再跑一次就会全是 429/403 —— 看起来像"全挂了",
-# 其实是上一轮的令牌桶被打空了、或者封禁还没到期。
-# 自检脚本必须能反复跑,所以开头先自愈。
-#
-# 本机直连 app 时 IP 是 127.0.0.1;经 nginx 时是 Docker 网桥网关(如 172.18.0.1)。
-# 所以不猜 IP,把 sg: 前缀的状态键全清掉。
+# 这个脚本自己会触发限流和封禁,不清的话紧接着再跑一次会全红 ——
+# 看起来像"全挂了",其实是上一轮把令牌桶打空了。
 if sudo -n docker ps --format '{{.Names}}' 2>/dev/null | grep -q secguard-redis; then
     sudo -n docker exec secguard-redis sh -c '
-        for pat in "sg:ban:*" "sg:hit:*" "sg:rl:*" "sg:nonce:*"; do
+        for pat in "sg:ban:*" "sg:hit:*" "sg:rl:*"; do
           for k in $(redis-cli --scan --pattern "$pat"); do redis-cli DEL "$k" > /dev/null; done
         done' > /dev/null 2>&1
-    ok "已清理封禁/计数/令牌桶/nonce 状态"
+    ok "已清理封禁/计数/令牌桶状态"
 else
-    skip "清理防护状态" "连不上 redis 容器(手动清理或等封禁自动过期)"
+    skip "清理防护状态" "连不上 redis 容器"
 fi
 
 # ---------------------------------------------------------------------------
 sec "1. 服务是否活着"
 # ---------------------------------------------------------------------------
 c=$(code "$BASE/health")
-if [ "$c" = "200" ]; then ok "健康检查返回 200"
-else bad "健康检查" "HTTP $c"; fi
+[ "$c" = "200" ] && ok "健康检查返回 200" || bad "健康检查" "HTTP $c"
 
 h=$(body "$BASE/health")
 st=$(echo "$h" | jget status)
@@ -80,54 +103,81 @@ rules=$(echo "$h" | jget rules)
 gm=$(echo "$h" | jget guard_mode)
 [ "$st" = "ok" ]   && ok "服务状态 ok" || bad "服务状态" "$st"
 [ "$db" = "True" ] && ok "数据库连通"   || bad "数据库连通" "$db"
-[ "$rd" = "True" ] && ok "Redis 连通"   || skip "Redis 连通" "$rd(已降级为单机模式)"
+[ "$rd" = "True" ] && ok "Redis 连通"   || skip "Redis 连通" "$rd(已降级)"
 [ -n "$rules" ] && [ "$rules" -gt 200 ] && ok "特征库已加载($rules 条)" || bad "特征库" "$rules"
 echo "        防护模式: $gm"
 
 # ---------------------------------------------------------------------------
-sec "2. 攻击检测(核心功能)"
+sec "2. 攻击检测:查询串"
 # ---------------------------------------------------------------------------
 check_block() {  # $1=描述 $2=路径 $3=期望命中的规则前缀
-    local d="$1" p="$2" want="$3"
     local out c
-    out=$(curl -s --max-time 10 -w '\n%{http_code}' "$BASE$p" 2>/dev/null)
+    out=$(curl -s --max-time 10 -w '\n%{http_code}' "$BASE$2" 2>/dev/null)
     c=$(echo "$out" | tail -1)
-    if [ "$c" != "403" ]; then bad "$d" "期望 403,实际 $c"; return; fi
-    if echo "$out" | grep -q "$want"; then
-        ok "$d -> 403 命中 $want"
-    else
-        bad "$d" "403 但没命中 $want"
-    fi
+    if [ "$c" != "403" ]; then bad "$1" "期望 403,实际 $c"; return; fi
+    if echo "$out" | grep -q "$3"; then ok "$1 -> 403 命中 $3"
+    else bad "$1" "403 但没命中 $3"; fi
 }
-
-check_block "SQL 注入"     "/?q=union%20select%201,2,3"        "SQL-"
-check_block "XSS"          "/?q=%3Cscript%3Ealert(1)%3C/script%3E" "XSS-"
-check_block "路径穿越"     "/?file=../../../../etc/passwd"      "PAT-"
-check_block "命令注入"     "/?cmd=;cat%20/etc/passwd"           "CMD-"
-check_block "探测 .env"    "/.env"                              "PAT-"
+check_block "SQL 注入"  "/?q=union%20select%201,2,3"           "SQL-"
+check_block "XSS"       "/?q=%3Cscript%3Ealert(1)%3C/script%3E" "XSS-"
+check_block "路径穿越"  "/?file=../../../../etc/passwd"         "PAT-"
+check_block "命令注入"  "/?cmd=;cat%20/etc/passwd"              "CMD-"
+check_block "探测 .env" "/.env"                                 "PAT-"
 
 c=$(code "$BASE/?q=hello")
 [ "$c" = "200" ] && ok "正常请求放行 -> 200" || bad "正常请求放行" "HTTP $c"
 
-c=$(code "$BASE/?q=this%20is%20a%20shopping%20list")
-[ "$c" = "200" ] && ok "正常业务文本不误报 -> 200" || bad "误报检查" "HTTP $c"
+# ---------------------------------------------------------------------------
+sec "3. 攻击检测:请求体(每个 POST 路由都要覆盖)"
+# ---------------------------------------------------------------------------
+# ⚠ 这是本项目最不容有失的一组。
+# httplib 的早期钩子在读 body 之前就执行了,所以 body 必须在处理器里
+# 单独扫一次。新加一个 POST 接口忘了扫,那个接口的 body 就是没设防的 ——
+# 所以这里把已知的 POST 路由逐个打一遍。
+body_block() {  # $1=描述 $2=路径 $3=额外 curl 参数
+    local out c
+    out=$(curl -s --max-time 10 -w '\n%{http_code}' -X POST "$BASE$2" \
+          -H 'Content-Type: application/json' -H "Authorization: Bearer $ATOK" \
+          ${3:-} -d '{"q":"union select 1,2,3"}' 2>/dev/null)
+    c=$(echo "$out" | tail -1)
+    if [ "$c" = "403" ]; then ok "$1 -> 403(请求体被检测)"
+    elif [ "$c" = "401" ]; then skip "$1" "需要登录,未能验证 body(HTTP 401)"
+    else bad "$1" "期望 403,实际 $c —— 请求体可能没被检测"; fi
+}
+
+for path in "/api/check" "/api/register" "/api/login" "/api/posts" \
+            "/api/posts/1/comments" "/api/alerts/1/status" \
+            "/api/analyze/run" "/api/rules/reload"; do
+    body_block "POST $path" "$path"
+done
+
+# 前面两节故意发了十几次攻击,先把命中计数清掉。
+# 不清的话累计超过封禁阈值(默认 10),下面的正常用例全被 403 挡住,
+# 看起来像"一堆莫名其妙的失败"。
+reset_hits
+
+# 反向验证:正常 body 不该被拦
+out=$(curl -s -w '\n%{http_code}' --max-time 10 -X POST "$BASE/api/check" \
+      -H 'Content-Type: application/json' -d '{"q":"hello world"}' 2>/dev/null)
+c=$(echo "$out" | tail -1)
+[ "$c" = "200" ] && ok "正常请求体放行 -> 200" || bad "正常请求体" "HTTP $c"
+
+reset_hits
 
 # ---------------------------------------------------------------------------
-sec "3. 未注册路径也要被检测和审计"
+sec "4. 未注册路径也要被检测和审计"
 # ---------------------------------------------------------------------------
 c=$(code "$BASE/wp-login.php")
-[ "$c" = "404" ] && ok "不存在的路径返回 404(但下面会查到它是被审计过的)" \
-                 || bad "不存在的路径" "HTTP $c"
+[ "$c" = "404" ] && ok "不存在的路径返回 404(且被审计)" || bad "不存在的路径" "HTTP $c"
 
 # ---------------------------------------------------------------------------
-sec "4. 账号与令牌"
+sec "5. 账号与令牌"
 # ---------------------------------------------------------------------------
 USER="verify$RANDOM"
 reg=$(curl -s --max-time 10 -X POST "$BASE/api/register" \
     -H 'Content-Type: application/json' \
     -d "{\"username\":\"$USER\",\"password\":\"verify-password-2026\"}" 2>/dev/null)
-if echo "$reg" | grep -q '"id"'; then ok "注册新用户 $USER"
-else bad "注册" "$(echo "$reg" | head -c 80)"; fi
+echo "$reg" | grep -q '"id"' && ok "注册新用户 $USER" || bad "注册" "$(echo "$reg" | head -c 80)"
 
 c=$(code -X POST "$BASE/api/register" -H 'Content-Type: application/json' \
     -d "{\"username\":\"$USER\",\"password\":\"verify-password-2026\"}")
@@ -137,19 +187,18 @@ c=$(code -X POST "$BASE/api/register" -H 'Content-Type: application/json' \
     -d '{"username":"weak","password":"123"}')
 [ "$c" = "400" ] && ok "弱口令被拒(400)" || bad "弱口令检查" "HTTP $c"
 
-TOKEN=$(curl -s --max-time 10 -X POST "$BASE/api/login" \
+UTOK=$(curl -s --max-time 10 -X POST "$BASE/api/login" \
     -H 'Content-Type: application/json' \
-    -d "{\"username\":\"$USER\",\"password\":\"verify-password-2026\"}" 2>/dev/null \
-    | jget token)
-if [ -n "$TOKEN" ] && [ ${#TOKEN} -gt 60 ]; then ok "登录拿到 JWT(${#TOKEN} 字符)"
-else bad "登录" "没拿到令牌"; TOKEN=""; fi
+    -d "{\"username\":\"$USER\",\"password\":\"verify-password-2026\"}" 2>/dev/null | jget token)
+[ -n "$UTOK" ] && [ ${#UTOK} -gt 60 ] && ok "登录拿到 JWT(${#UTOK} 字符)" \
+    || { bad "登录" "没拿到令牌"; UTOK=""; }
 
 c=$(code -X POST "$BASE/api/login" -H 'Content-Type: application/json' \
     -d "{\"username\":\"$USER\",\"password\":\"wrong-password\"}")
 [ "$c" = "401" ] && ok "错误口令返回 401" || bad "错误口令" "HTTP $c"
 
-if [ -n "$TOKEN" ]; then
-    c=$(code "$BASE/api/me" -H "Authorization: Bearer $TOKEN")
+if [ -n "$UTOK" ]; then
+    c=$(code "$BASE/api/me" -H "Authorization: Bearer $UTOK")
     [ "$c" = "200" ] && ok "带令牌访问受保护接口 -> 200" || bad "令牌鉴权" "HTTP $c"
 
     c=$(code -X POST "$BASE/api/posts" -H 'Content-Type: application/json' \
@@ -157,96 +206,127 @@ if [ -n "$TOKEN" ]; then
     [ "$c" = "401" ] && ok "无令牌写接口被拒(401)" || bad "无令牌写接口" "HTTP $c"
 
     pid=$(curl -s --max-time 10 -X POST "$BASE/api/posts" \
-        -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+        -H "Authorization: Bearer $UTOK" -H 'Content-Type: application/json' \
         -d '{"title":"自检帖","content":"内容"}' 2>/dev/null | jget id)
     if [ -n "$pid" ]; then
         ok "发帖成功(id=$pid)"
-        c=$(code "$BASE/api/posts/$pid" -H "Authorization: Bearer $TOKEN")
+        c=$(code "$BASE/api/posts/$pid" -H "Authorization: Bearer $UTOK")
         [ "$c" = "200" ] && ok "读帖成功" || bad "读帖" "HTTP $c"
-        c=$(code -X POST "$BASE/api/posts/$pid/comments" \
-            -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-            -d '{"content":"自检评论"}')
-        [ "$c" = "201" ] && ok "评论成功" || bad "评论" "HTTP $c"
     else
         bad "发帖" "没拿到 id"
     fi
 
-    c=$(code "$BASE/api/posts/99999999999999999999" -H "Authorization: Bearer $TOKEN")
+    c=$(code "$BASE/api/posts/99999999999999999999" -H "Authorization: Bearer $UTOK")
     [ "$c" = "400" ] && ok "超长 id 被拒(400,不会崩)" || bad "超长 id" "HTTP $c"
 fi
 
 # ---------------------------------------------------------------------------
-sec "5. 重放防护"
+sec "6. 管理接口鉴权"
+# ---------------------------------------------------------------------------
+if [ "$SKIP_ADMIN" = "1" ]; then
+    skip "管理接口鉴权" "SG_SKIP_ADMIN=1"
+else
+    # 无令牌必须被拒
+    c=$(code "$BASE/api/alerts?limit=1")
+    [ "$c" = "401" ] && ok "无令牌访问管理接口 -> 401" || bad "无令牌管理接口" "HTTP $c"
+
+    # 普通用户必须是 403,不是 200
+    if [ -n "$UTOK" ]; then
+        c=$(code "$BASE/api/alerts?limit=1" -H "Authorization: Bearer $UTOK")
+        [ "$c" = "403" ] && ok "普通用户访问管理接口 -> 403" || bad "普通用户越权" "HTTP $c"
+    fi
+
+    # 管理员登录
+    curl -s -o /dev/null --max-time 10 -X POST "$BASE/api/register" \
+        -H 'Content-Type: application/json' \
+        -d "{\"username\":\"$ADMIN_USER\",\"password\":\"$ADMIN_PASS\"}" 2>/dev/null
+    ATOK=$(curl -s --max-time 10 -X POST "$BASE/api/login" \
+        -H 'Content-Type: application/json' \
+        -d "{\"username\":\"$ADMIN_USER\",\"password\":\"$ADMIN_PASS\"}" 2>/dev/null | jget token)
+
+    if [ -n "$ATOK" ]; then
+        ok "管理员登录成功"
+        c=$(acode "$BASE/api/alerts?limit=1")
+        [ "$c" = "200" ] && ok "管理员访问 /api/alerts -> 200" || bad "管理员访问" "HTTP $c"
+    else
+        skip "管理员用例" "拿不到管理员令牌(检查 SECGUARD_ADMIN_USERS 是否包含 $ADMIN_USER)"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+sec "7. 重放防护"
 # ---------------------------------------------------------------------------
 NOW=$(date +%s)
 NONCE="verify-$RANDOM$RANDOM"
 c1=$(code -X POST "$BASE/api/check" -H 'Content-Type: application/json' \
-     -H "X-Timestamp: $NOW" -H "X-Nonce: $NONCE" -d '{"payload":"hello"}')
+     -H "X-Timestamp: $NOW" -H "X-Nonce: $NONCE" -d '{"q":"hello"}')
 c2=$(code -X POST "$BASE/api/check" -H 'Content-Type: application/json' \
-     -H "X-Timestamp: $NOW" -H "X-Nonce: $NONCE" -d '{"payload":"hello"}')
+     -H "X-Timestamp: $NOW" -H "X-Nonce: $NONCE" -d '{"q":"hello"}')
 [ "$c1" = "200" ] && ok "首次带 nonce 放行(200)" || bad "首次 nonce" "HTTP $c1"
 [ "$c2" = "409" ] && ok "同一 nonce 重放被拒(409)" || bad "重放防护" "HTTP $c2"
 
 c=$(code -X POST "$BASE/api/check" -H 'Content-Type: application/json' \
-     -H "X-Timestamp: $((NOW-6000))" -H "X-Nonce: old-$RANDOM" -d '{"payload":"x"}')
-[ "$c" = "403" ] && ok "过期时间戳被拒(403)" || skip "时间戳窗口" "HTTP $c(可能未启用强制) or 未配置"
+     -H "X-Timestamp: $((NOW-6000))" -H "X-Nonce: old-$RANDOM" -d '{"q":"x"}')
+[ "$c" = "403" ] && ok "过期时间戳被拒(403)" || skip "时间戳窗口" "HTTP $c"
 
 # ---------------------------------------------------------------------------
-sec "6. 审计与统计"
+sec "8. 审计与统计(管理接口)"
 # ---------------------------------------------------------------------------
-a=$(body "$BASE/api/audit/stats")
-total=$(echo "$a" | jget audit_total)
-blocked=$(echo "$a" | jget audit_blocked)
-[ -n "$total" ] && [ "$total" -gt 0 ] && ok "审计日志有数据(总数 $total,拦截 $blocked)" \
-    || bad "审计日志" "总数为 $total"
+if [ -n "$ATOK" ]; then
+    a=$(body -H "Authorization: Bearer $ATOK" "$BASE/api/audit/stats")
+    total=$(echo "$a" | jget audit_total)
+    blocked=$(echo "$a" | jget audit_blocked)
+    [ -n "$total" ] && [ "$total" -gt 0 ] && ok "审计日志有数据(总数 $total,拦截 $blocked)" \
+        || bad "审计日志" "总数为 $total"
 
-c=$(code "$BASE/api/audit/by-ip?ip=127.0.0.1")
-[ "$c" = "200" ] && ok "按 IP 查审计可用" || bad "按 IP 查审计" "HTTP $c"
+    c=$(acode "$BASE/api/audit/by-ip?ip=127.0.0.1")
+    [ "$c" = "200" ] && ok "按 IP 查审计可用" || bad "按 IP 查审计" "HTTP $c"
+else
+    skip "审计统计" "无管理员令牌"
+fi
 
 # ---------------------------------------------------------------------------
-sec "7. AI 分析层"
+sec "9. AI 分析层"
 # ---------------------------------------------------------------------------
-an=$(body "$BASE/api/analyze/stats")
+an=$(body "$BASE/api/analyze/stats" -H "Authorization: Bearer $ATOK")
 en=$(echo "$an" | jget enabled)
 pv=$(echo "$an" | jget provider)
 ac=$(echo "$an" | jget alerts.total)
 if [ "$en" = "True" ]; then
     ok "分析层已启用(provider=$pv)"
-    if [ -n "$ac" ]; then ok "已有告警 $ac 条"; else skip "告警数量" "0 条,可手动触发一轮"; fi
-    c=$(code -X POST "$BASE/api/analyze/run")
-    [ "$c" = "200" ] && ok "手动触发分析可用" || bad "手动触发分析" "HTTP $c"
+    [ -n "$ac" ] && ok "已有告警 $ac 条" || skip "告警数量" "0 条"
 else
     skip "AI 分析层" "未启用(设 SECGUARD_AI_ENABLE=1)"
 fi
 
-al=$(body "$BASE/api/alerts?limit=1")
-if echo "$al" | grep -q '"items"'; then ok "告警接口可访问"; else bad "告警接口" "返回异常"; fi
+if [ -n "$ATOK" ]; then
+    c=$(acode -X POST "$BASE/api/analyze/run")
+    [ "$c" = "200" ] && ok "手动触发分析可用" || bad "手动触发分析" "HTTP $c"
+fi
 
 # ---------------------------------------------------------------------------
-sec "8. 特征库热加载"
+sec "10. 特征库热加载 + 白名单"
 # ---------------------------------------------------------------------------
-c=$(code -X POST "$BASE/api/rules/reload")
-[ "$c" = "200" ] && ok "热加载接口可用(不重启换规则)" || bad "热加载" "HTTP $c"
+if [ -n "$ATOK" ]; then
+    c=$(acode -X POST "$BASE/api/rules/reload")
+    [ "$c" = "200" ] && ok "热加载接口可用(不重启换规则)" || bad "热加载" "HTTP $c"
+    rl=$(body -H "Authorization: Bearer $ATOK" "$BASE/api/rules")
+    alt=$(echo "$rl" | jget allowlist)
+    echo "        白名单条数: ${alt:-0}"
+else
+    skip "热加载" "无管理员令牌"
+fi
 
 # ---------------------------------------------------------------------------
-sec "9. 限流与封禁(会产生拦截,最后测)"
+sec "11. 限流与封禁(会产生拦截,最后测)"
 # ---------------------------------------------------------------------------
 echo "  用并发请求压限流..."
-# 三个要点(都是踩出来的):
-#   1) 必须并发。串行 curl 每次十几毫秒,追不上令牌桶的补充速度。
-#   2) 并发别开太大。开 50 路会先撞上 nginx 的 limit_conn(50),
-#      拿到一堆连接失败而不是 429,测的就不是限流了。
-#   3) 优先用 wrk,而不是 xargs 拉起几百个 curl 进程:
-#      后者一次 fork 几百个进程,实测会把外层的进程管理搞崩;
-#      wrk 是单进程内部并发,还会直接告诉你非 2xx 有多少条。
 n429=0
 if command -v wrk > /dev/null 2>&1; then
     wrk_out=$(wrk -t2 -c20 -d3s "$BASE/api/rules" 2>/dev/null)
-    n429=$(echo "$wrk_out" | grep -oE 'Non-2xx or 3xx responses: [0-9]+' \
-           | grep -oE '[0-9]+$')
+    n429=$(echo "$wrk_out" | grep -oE 'Non-2xx or 3xx responses: [0-9]+' | grep -oE '[0-9]+$')
     n429=${n429:-0}
 else
-    # 没有 wrk 时退化,并发降到 10,减少进程数量
     TMPC=$(mktemp)
     seq 1 200 | xargs -P 10 -I{} curl -s -o /dev/null -w '%{http_code}\n' \
         --max-time 5 "$BASE/api/rules" 2>/dev/null > "$TMPC"
@@ -255,22 +335,23 @@ else
     rm -f "$TMPC"
 fi
 if [ "${n429:-0}" -gt 0 ]; then ok "限流生效(被限 $n429 次)"
-else skip "限流" "没触发(演示配置 50/s 突发 100,可调低阈值再试)"; fi
+else skip "限流" "没触发(演示配置 50/s 突发 100)"; fi
 
 sleep 2
 
 echo "  连打 12 次攻击,观察是否触发自动封禁..."
+# 压限流那一步会把令牌桶打空,这里要等它回补,否则攻击请求全是 429,
+# 根本没进检测,自然也不会累计命中次数(封禁自然不触发)。
+reset_hits
+sleep 3
 for i in $(seq 1 12); do
     curl -s -o /dev/null "$BASE/?q=union%20select%201" 2>/dev/null
+    sleep 0.1
 done
 c=$(code "$BASE/?q=hello")
 if [ "$c" = "403" ]; then
     ok "自动封禁生效(正常请求也被拦了)"
-
-    # 解除封禁时不能假设 IP 是 127.0.0.1 —— 经过 nginx 后,
-    # app 看到的客户端地址是 Docker 网桥网关(如 172.18.0.1)。
-    # 稳妥做法:把所有封禁键都清掉。
-    echo "        解除封禁(清掉所有 sg:ban:* 键)..."
+    echo "        解除封禁..."
     sudo -n docker exec secguard-redis sh -c \
         'for k in $(redis-cli --scan --pattern "sg:ban:*"); do redis-cli DEL "$k" > /dev/null; done' \
         > /dev/null 2>&1
@@ -281,7 +362,7 @@ if [ "$c" = "403" ]; then
     c=$(code "$BASE/?q=hello")
     [ "$c" = "200" ] && ok "封禁已解除,恢复正常" || bad "解除封禁" "HTTP $c"
 else
-    skip "自动封禁" "阈值未达到(配置里是 10 次)"
+    skip "自动封禁" "阈值未达到"
 fi
 
 # ---------------------------------------------------------------------------

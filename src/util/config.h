@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "ai/llm_client.h"
 #include "cache/redis_client.h"
@@ -30,6 +31,9 @@ struct AuthConfig {
     int         pbkdf2_iterations = 120000;    // 故意算得慢(第 43 讲)
     int         login_fail_limit = 5;          // 连续失败几次就锁
     int         login_lock_seconds = 300;      // 锁多久
+    // 管理员用户名名单(逗号分隔)。只有名单里的用户能访问管理接口。
+    // 空 = 管理接口全部关闭(fail-closed),启动时打警告。
+    std::vector<std::string> admin_users;
 };
 
 struct ServerConfig {
@@ -50,6 +54,8 @@ struct ServerConfig {
 
 struct EngineConfig {
     std::string pattern_file;           // 特征库路径
+    // 白名单:某个路径下放行某些规则。缺失不算错误。
+    std::string allowlist_file = "rules/allowlist.conf";
     std::size_t max_pattern_len = 4096; // 超长模式拒收(第 13 讲)
     std::size_t max_text_bytes = 256 * 1024;   // 待检文本上限(第 17 讲)
     std::size_t max_hits = 512;         // 单次匹配最多报多少条(第 25 讲)

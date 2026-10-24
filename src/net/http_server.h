@@ -49,10 +49,40 @@ bool run_guard(AppContext& ctx, const httplib::Request& req,
 // 每个工作线程同一时刻只处理一个请求,所以 thread_local 是安全的。
 [[nodiscard]] ScanRecord& current_scan();
 
+// 扫请求体。返回 false 表示命中攻击、已拦下(response 已写好)。
+//
+// 为什么需要单独一个函数:httplib 的两个早期钩子
+// (set_pre_routing_handler / set_pre_request_handler) 都在**读取请求体之前**
+// 执行 —— 这是它源码里刻意的设计,避免为被拒的请求缓冲大包。
+// 所以前置钩子只能扫路径、查询串、UA,拿不到 body。
+//
+// 代价是检测被拆成了两处:
+//   路径+查询串+UA -> 前置钩子(覆盖所有请求,包括未注册路径)
+//   body          -> 这里(每个接收请求体的处理器开头调一次)
+//
+// 拆分本身有风险:新加一个 POST 接口忘了调这一行,那个接口的 body 就是
+// 没设防的。所以 scripts/verify.sh 里有一组用例,把**每个** POST 路由都
+// 用"只在 body 里放攻击特征"的请求打一遍,漏了就红。
+bool scan_body(AppContext& ctx, const httplib::Request& req,
+               httplib::Response& res, ScanRecord& rec);
+
 void record_audit(AppContext& ctx, const ScanRecord& rec);
 
 bool current_user(AppContext& ctx, const httplib::Request& req,
                   std::int64_t& user_id, std::string& username);
+
+// 管理接口守卫:要求带令牌,且令牌里的用户名在 SECGUARD_ADMIN_USERS 名单里。
+//
+// 为什么必须有它:原来 /api/alerts、/api/analyze/run、/api/rules/reload
+// 全是裸的 —— 谁都能看审计数据、谁都能触发 LLM 调用,
+// 甚至能 POST /api/alerts/{id}/status 把攻击标记成"误报",等于自己删证据。
+// 一个安全审计项目留这种洞是说不通的。
+//
+// 判别方式用的是"用户名名单"而不是数据库里的 role 字段:
+// 名单在环境变量里,不依赖表结构迁移,也不会因为令牌签发时机不同而不一致。
+// 代价是要改名单得重启服务 —— 对这个量级来说可以接受。
+bool require_admin(AppContext& ctx, const httplib::Request& req,
+                   httplib::Response& res, std::string& username);
 
 void register_routes(httplib::Server& svr, AppContext& ctx);
 void register_auth_routes(httplib::Server& svr, AppContext& ctx);

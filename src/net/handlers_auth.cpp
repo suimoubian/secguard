@@ -56,6 +56,9 @@ void register_auth_routes(httplib::Server& svr, AppContext& ctx) {
     // ---- 注册 ----
     svr.Post("/api/register", [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
 
         nlohmann::json body;
         if (!parse_body(req, body)) { json_err(res, 400, "请求体必须是 JSON 对象"); return; }
@@ -102,6 +105,9 @@ void register_auth_routes(httplib::Server& svr, AppContext& ctx) {
     // ---- 登录 ----
     svr.Post("/api/login", [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
 
         // IP 只从 run_guard 里取,不在这里另算一遍 ——
         // 两处各算各的,迟早会出现"限流用的是 A 口径、锁定用的是 B 口径"。
@@ -174,6 +180,9 @@ void register_auth_routes(httplib::Server& svr, AppContext& ctx) {
     // ---- 续期:只验签名不验口令,所以很便宜(第 44 讲) ----
     svr.Post("/api/refresh", [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
 
         std::int64_t uid = 0;
         std::string uname;
@@ -203,6 +212,9 @@ void register_auth_routes(httplib::Server& svr, AppContext& ctx) {
     // ---- 我是谁 ----
     svr.Get("/api/me", [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
 
         std::int64_t uid = 0;
         std::string uname;

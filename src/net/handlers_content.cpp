@@ -58,6 +58,9 @@ void register_content_routes(httplib::Server& svr, AppContext& ctx) {
     // ---- 发帖 ----
     svr.Post("/api/posts", [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
 
         std::int64_t uid = 0;
         std::string uname;
@@ -90,6 +93,9 @@ void register_content_routes(httplib::Server& svr, AppContext& ctx) {
     // ---- 帖子列表 ----
     svr.Get("/api/posts", [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
 
         const int limit = int_param(req, "limit", 20, 1, 100);
         const int offset = int_param(req, "offset", 0, 0, 1000000);
@@ -113,6 +119,9 @@ void register_content_routes(httplib::Server& svr, AppContext& ctx) {
     // ---- 单个帖子 ----
     svr.Get(R"(/api/posts/(\d+))", [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
 
         std::int64_t id = 0;
         if (!parse_id(req.matches[1].str(), id)) { json_err(res, 400, "id 不合法"); return; }
@@ -134,6 +143,9 @@ void register_content_routes(httplib::Server& svr, AppContext& ctx) {
     // ---- 删帖:只能删自己的 ----
     svr.Delete(R"(/api/posts/(\d+))", [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
 
         std::int64_t uid = 0;
         std::string uname;
@@ -156,6 +168,9 @@ void register_content_routes(httplib::Server& svr, AppContext& ctx) {
     // ---- 评论 ----
     svr.Post(R"(/api/posts/(\d+)/comments)", [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
 
         std::int64_t uid = 0;
         std::string uname;
@@ -187,6 +202,9 @@ void register_content_routes(httplib::Server& svr, AppContext& ctx) {
     // ---- 评论列表 ----
     svr.Get(R"(/api/posts/(\d+)/comments)", [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
 
         std::int64_t post_id = 0;
         if (!parse_id(req.matches[1].str(), post_id)) { json_err(res, 400, "id 不合法"); return; }

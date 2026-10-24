@@ -25,8 +25,15 @@ bool valid_ip_like(const std::string& s) {
 
 void register_audit_routes(httplib::Server& svr, AppContext& ctx) {
     // ---- 总体统计 ----
-    svr.Get("/api/audit/stats", [&ctx](const httplib::Request&, httplib::Response& res) {
+    svr.Get("/api/audit/stats", [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
+        // 管理接口:必须管理员令牌。原来这 8 个接口是裸的,
+        // 谁都能看审计数据、还能把攻击标成"误报"删证据。
+        std::string admin;
+        if (!require_admin(ctx, req, res, admin)) return;
 
         const auto st = ctx.dao->audit_stats();
         nlohmann::json j;
@@ -63,6 +70,13 @@ void register_audit_routes(httplib::Server& svr, AppContext& ctx) {
     // ---- 按 IP 查最近的拦截记录(走 idx_ip_time 索引) ----
     svr.Get("/api/audit/by-ip", [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
+        // 管理接口:必须管理员令牌。原来这 8 个接口是裸的,
+        // 谁都能看审计数据、还能把攻击标成"误报"删证据。
+        std::string admin;
+        if (!require_admin(ctx, req, res, admin)) return;
 
         if (!req.has_param("ip")) { json_err(res, 400, "缺少 ip 参数"); return; }
         const std::string ip = req.get_param_value("ip");
@@ -95,14 +109,22 @@ void register_audit_routes(httplib::Server& svr, AppContext& ctx) {
     });
 
     // ---- 特征库信息 ----
-    svr.Get("/api/rules", [&ctx](const httplib::Request&, httplib::Response& res) {
+    svr.Get("/api/rules", [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
+        // 管理接口:必须管理员令牌。原来这 8 个接口是裸的,
+        // 谁都能看审计数据、还能把攻击标成"误报"删证据。
+        std::string admin;
+        if (!require_admin(ctx, req, res, admin)) return;
 
         nlohmann::json j;
         j["rule_count"] = ctx.engine->rule_count();
         j["node_count"] = ctx.engine->node_count();
         j["memory_kb"] = ctx.engine->memory_bytes() / 1024;
         j["generation"] = ctx.engine->generation();
+        j["allowlist"] = ctx.engine->allowlist_size();
 
         rec.status_code = 200;
         record_audit(ctx, rec);
@@ -110,8 +132,15 @@ void register_audit_routes(httplib::Server& svr, AppContext& ctx) {
     });
 
     // ---- 热加载:不停止服务换规则(第 14 讲) ----
-    svr.Post("/api/rules/reload", [&ctx](const httplib::Request&, httplib::Response& res) {
+    svr.Post("/api/rules/reload", [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
+        // 管理接口:必须管理员令牌。原来这 8 个接口是裸的,
+        // 谁都能看审计数据、还能把攻击标成"误报"删证据。
+        std::string admin;
+        if (!require_admin(ctx, req, res, admin)) return;
 
         std::size_t n = 0;
         const bool changed = ctx.engine->reload_if_changed(
@@ -139,6 +168,13 @@ void register_audit_routes(httplib::Server& svr, AppContext& ctx) {
     // ---- 告警列表 ----
     svr.Get("/api/alerts", [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
+        // 管理接口:必须管理员令牌。原来这 8 个接口是裸的,
+        // 谁都能看审计数据、还能把攻击标成"误报"删证据。
+        std::string admin;
+        if (!require_admin(ctx, req, res, admin)) return;
 
         int limit = 20;
         int offset = 0;
@@ -190,6 +226,13 @@ void register_audit_routes(httplib::Server& svr, AppContext& ctx) {
     svr.Post(R"(/api/alerts/(\d+)/status)",
              [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
+        // 管理接口:必须管理员令牌。原来这 8 个接口是裸的,
+        // 谁都能看审计数据、还能把攻击标成"误报"删证据。
+        std::string admin;
+        if (!require_admin(ctx, req, res, admin)) return;
 
         std::int64_t id = 0;
         {
@@ -230,8 +273,15 @@ void register_audit_routes(httplib::Server& svr, AppContext& ctx) {
     });
 
     // ---- 手动触发一轮分析(演示与运维用) ----
-    svr.Post("/api/analyze/run", [&ctx](const httplib::Request&, httplib::Response& res) {
+    svr.Post("/api/analyze/run", [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
+        // 管理接口:必须管理员令牌。原来这 8 个接口是裸的,
+        // 谁都能看审计数据、还能把攻击标成"误报"删证据。
+        std::string admin;
+        if (!require_admin(ctx, req, res, admin)) return;
 
         if (!ctx.analyzer) { json_err(res, 503, "分析层未初始化"); return; }
         if (!ctx.cfg.ai.enabled) {
@@ -267,8 +317,15 @@ void register_audit_routes(httplib::Server& svr, AppContext& ctx) {
     });
 
     // ---- 分析层状态 ----
-    svr.Get("/api/analyze/stats", [&ctx](const httplib::Request&, httplib::Response& res) {
+    svr.Get("/api/analyze/stats", [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
+        // 管理接口:必须管理员令牌。原来这 8 个接口是裸的,
+        // 谁都能看审计数据、还能把攻击标成"误报"删证据。
+        std::string admin;
+        if (!require_admin(ctx, req, res, admin)) return;
 
         nlohmann::json j;
         j["enabled"] = ctx.cfg.ai.enabled;

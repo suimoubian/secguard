@@ -68,6 +68,21 @@ bool Config::load(Config& out, std::string& err) {
         return false;
     }
 
+    // 管理员名单:逗号分隔。空 = 管理接口全关(fail-closed)
+    {
+        const std::string raw = env_str("SECGUARD_ADMIN_USERS", "");
+        std::string cur;
+        for (char c : raw) {
+            if (c == ',') {
+                if (!cur.empty()) out.auth.admin_users.push_back(cur);
+                cur.clear();
+            } else if (c != ' ' && c != '\t') {
+                cur.push_back(c);
+            }
+        }
+        if (!cur.empty()) out.auth.admin_users.push_back(cur);
+    }
+
     // --- 服务 ---
     out.server.bind_addr = env_str("SECGUARD_BIND", out.server.bind_addr);
     if (!env_int("SECGUARD_PORT", out.server.port)) { err = "SECGUARD_PORT 不是整数"; return false; }
@@ -81,6 +96,7 @@ bool Config::load(Config& out, std::string& err) {
 
     // --- 引擎 ---
     out.engine.pattern_file = env_str("SECGUARD_PATTERN_FILE", "rules/attack_patterns.txt");
+    out.engine.allowlist_file = env_str("SECGUARD_ALLOWLIST_FILE", out.engine.allowlist_file);
     if (!env_size("SECGUARD_MAX_PATTERN_LEN", out.engine.max_pattern_len)) { err = "SECGUARD_MAX_PATTERN_LEN 不是整数"; return false; }
     if (!env_size("SECGUARD_MAX_TEXT", out.engine.max_text_bytes)) { err = "SECGUARD_MAX_TEXT 不是整数"; return false; }
     if (!env_size("SECGUARD_MAX_HITS", out.engine.max_hits)) { err = "SECGUARD_MAX_HITS 不是整数"; return false; }
@@ -206,6 +222,17 @@ std::string Config::describe() const {
         << "  鉴权     令牌有效期=" << auth.token_ttl_seconds << "s"
         << "  PBKDF2迭代=" << auth.pbkdf2_iterations
         << "  登录失败上限=" << auth.login_fail_limit << "  密钥=***\n"
+        << "  管理接口 " << (auth.admin_users.empty()
+               ? std::string("已关闭(未配置 SECGUARD_ADMIN_USERS)")
+               : ("管理员=" + [this] {
+                     std::string s;
+                     for (const auto& u : auth.admin_users) {
+                         if (!s.empty()) s += ',';
+                         s += u;
+                     }
+                     return s;
+                 }()))
+        << "\n"
         << "  引擎     特征库=" << engine.pattern_file
         << "  文本上限=" << engine.max_text_bytes << "B"
         << "  命中上限=" << engine.max_hits

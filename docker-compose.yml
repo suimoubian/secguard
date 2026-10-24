@@ -103,6 +103,10 @@ services:
       SECGUARD_DB_POOL: ${SECGUARD_DB_POOL:-8}
 
       SECGUARD_JWT_SECRET: ${SECGUARD_JWT_SECRET:?必须在 .env 里设置 SECGUARD_JWT_SECRET}
+      # 管理员用户名名单(逗号分隔)。只有名单里的用户能访问
+      # /api/alerts、/api/audit/*、/api/analyze/*、/api/rules* 这些管理接口。
+      # 留空 = 管理接口全部关闭(fail-closed),不会出现"忘了配等于没锁"。
+      SECGUARD_ADMIN_USERS: ${SECGUARD_ADMIN_USERS:-}
 
       SECGUARD_REDIS_HOST: redis
       SECGUARD_REDIS_PORT: "6379"

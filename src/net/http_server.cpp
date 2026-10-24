@@ -197,15 +197,37 @@ bool run_guard(AppContext& ctx, const httplib::Request& req,
     rec.scan_bytes = mr.scanned_bytes;
     rec.matched_len = static_cast<int>(mr.max_matched_len);
 
-    if (!mr.rule_indices.empty()) {
+    // 用白名单过滤命中结果。
+    //
+    // 注意这里的信任模型:白名单是"路径 + 规则"的声明,由运维写在文件里。
+    // 攻击者无法通过构造载荷来触发它 —— 他只能让自己的请求落到某个路径上,
+    // 而那个路径排除了哪条规则,是运维事先决定的。
+    // 这也是为什么白名单必须小、必须有人审。
+    std::vector<std::int32_t> effective_hits;
+    effective_hits.reserve(mr.rule_indices.size());
+    std::string allowlisted_ids;
+    for (std::int32_t idx : mr.rule_indices) {
+        const std::string& rid = ctx.engine->rule(idx).id;
+        if (ctx.engine->is_allowlisted(req.path, rid)) {
+            if (!allowlisted_ids.empty()) allowlisted_ids.push_back(',');
+            allowlisted_ids += rid;
+            continue;
+        }
+        effective_hits.push_back(idx);
+    }
+    if (!allowlisted_ids.empty()) {
+        LOG_INFO(kTag, "白名单放行 path=", req.path, " 规则=", allowlisted_ids);
+    }
+
+    if (!effective_hits.empty()) {
         // 命中的规则 ID 拼起来(最多列 8 条,避免超长)
         std::string ids;
-        const std::size_t limit = std::min<std::size_t>(mr.rule_indices.size(), 8);
+        const std::size_t limit = std::min<std::size_t>(effective_hits.size(), 8);
         for (std::size_t i = 0; i < limit; ++i) {
             if (i) ids.push_back(',');
-            ids += ctx.engine->rule(mr.rule_indices[i]).id;
+            ids += ctx.engine->rule(effective_hits[i]).id;
         }
-        if (mr.rule_indices.size() > limit) ids += ",...";
+        if (effective_hits.size() > limit) ids += ",...";
         rec.rule_hit = ids;
         if (mr.truncated) rec.rule_hit += "(截断)";
 
@@ -237,6 +259,75 @@ bool run_guard(AppContext& ctx, const httplib::Request& req,
     rec.cost_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     (void)action_of;
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// 扫请求体
+//
+// 前置钩子拿不到 body(httplib 在 dispatch 时才读),所以接收请求体的
+// 处理器要在开头调用这个函数补一次检测。
+//
+// 只扫 body,不重复扫路径和查询串 —— 那部分前置钩子已经扫过了,
+// 重复扫会让同一个命中被计两次。
+// ---------------------------------------------------------------------------
+bool scan_body(AppContext& ctx, const httplib::Request& req,
+               httplib::Response& res, ScanRecord& rec) {
+    if (req.body.empty()) return true;          // 没有 body,没什么可扫
+    if (!ctx.engine) return true;
+
+    const MatchResult mr = ctx.engine->search(req.body);
+    if (mr.rule_indices.empty()) return true;
+
+    // 白名单过滤(与前置钩子里的口径一致)
+    std::vector<std::int32_t> effective;
+    std::string allowlisted_ids;
+    for (std::int32_t idx : mr.rule_indices) {
+        const std::string& rid = ctx.engine->rule(idx).id;
+        if (ctx.engine->is_allowlisted(req.path, rid)) {
+            if (!allowlisted_ids.empty()) allowlisted_ids.push_back(',');
+            allowlisted_ids += rid;
+            continue;
+        }
+        effective.push_back(idx);
+    }
+    if (!allowlisted_ids.empty()) {
+        LOG_INFO(kTag, "白名单放行(请求体) path=", req.path, " 规则=", allowlisted_ids);
+    }
+    if (effective.empty()) return true;
+
+    std::string ids;
+    const std::size_t limit = std::min<std::size_t>(effective.size(), 8);
+    for (std::size_t i = 0; i < limit; ++i) {
+        if (i) ids.push_back(',');
+        ids += ctx.engine->rule(effective[i]).id;
+    }
+    if (effective.size() > limit) ids += ",...";
+
+    // 合并到当前记录的命中列表里(前置钩子可能已经记了一些)
+    if (rec.rule_hit.empty()) rec.rule_hit = ids;
+    else rec.rule_hit += "," + ids;
+    rec.matched_len = static_cast<int>(std::max<std::size_t>(
+        static_cast<std::size_t>(rec.matched_len), mr.max_matched_len));
+    rec.scan_bytes += mr.scanned_bytes;
+
+    ctx.guard->record_hit(rec.ip, ctx.cfg.guard.hit_threshold,
+                          ctx.cfg.guard.window_seconds,
+                          ctx.cfg.guard.ban_seconds);
+
+    rec.action = "BLOCK";
+    rec.status_code = 403;
+    ctx.requests_blocked.fetch_add(1);
+
+    nlohmann::json j;
+    j["error"] = "请求体被安全策略拦截";
+    j["trace_id"] = rec.trace_id;
+    j["rule_hit"] = rec.rule_hit;
+    res.status = 403;
+    res.set_content(j.dump(), "application/json; charset=utf-8");
+
+    LOG_INFO(kTag, "请求体命中: path=", req.path, " 规则=", ids);
+    record_audit(ctx, rec);
+    return false;
 }
 
 void record_audit(AppContext& ctx, const ScanRecord& rec) {
@@ -289,6 +380,36 @@ bool current_user(AppContext& ctx, const httplib::Request& req,
 }
 
 // ---------------------------------------------------------------------------
+// 管理接口守卫
+//
+// 这里必须 fail-closed:名单为空时一律拒绝,而不是"没人配就全放开"。
+// 后者是配置类漏洞最典型的一种 —— 忘了配等于没锁。
+// ---------------------------------------------------------------------------
+bool require_admin(AppContext& ctx, const httplib::Request& req,
+                   httplib::Response& res, std::string& username) {
+    std::int64_t uid = 0;
+    if (!current_user(ctx, req, uid, username)) {
+        json_err(res, 401, "需要管理员令牌(先登录,再带 Authorization: Bearer <token>)");
+        return false;
+    }
+    const auto& list = ctx.cfg.auth.admin_users;
+    if (list.empty()) {
+        // 没配名单 = 管理接口关闭。明确告诉运维怎么开,别让人猜。
+        LOG_WARN(kTag, "管理接口被访问但未配置管理员名单,已拒绝: ",
+                 req.path, " user=", username);
+        json_err(res, 403,
+                 "管理接口未启用(需在环境变量 SECGUARD_ADMIN_USERS 里配置管理员用户名)");
+        return false;
+    }
+    for (const auto& u : list) {
+        if (u == username) return true;
+    }
+    LOG_WARN(kTag, "非管理员访问管理接口: ", req.path, " user=", username);
+    json_err(res, 403, "需要管理员权限");
+    return false;
+}
+
+// ---------------------------------------------------------------------------
 // 路由注册
 // ---------------------------------------------------------------------------
 static void register_core_routes(httplib::Server& svr, AppContext& ctx) {
@@ -328,8 +449,11 @@ static void register_core_routes(httplib::Server& svr, AppContext& ctx) {
     // 前端页面:一个查询框 + 结果
     // 注意:这一条也要过检测 —— 所有路由都该被检测,不能只护 /api/*。
     // (踩过这个坑:只把 /api/* 接进引擎,首面就成了没设防的入口。)
-    svr.Get("/", [&ctx](const httplib::Request&, httplib::Response& res) {
+    svr.Get("/", [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
         rec.status_code = 200;
         record_audit(ctx, rec);
 
@@ -357,8 +481,11 @@ static void register_core_routes(httplib::Server& svr, AppContext& ctx) {
     });
 
     // 检测接口:只做检测,不落业务数据
-    svr.Post("/api/check", [&ctx](const httplib::Request&, httplib::Response& res) {
+    svr.Post("/api/check", [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
 
         const auto t0 = std::chrono::steady_clock::now();
         nlohmann::json j;
@@ -408,8 +535,11 @@ void register_routes(httplib::Server& svr, AppContext& ctx) {
     // 有了上面的前置钩子,这些请求已经过检测、也已经写了审计,
     // 所以这里只需把状态码记进审计再返回。
     // (扫描器探测 /admin、/.env 这类路径时,正是走这里。)
-    auto fallback = [&ctx](const httplib::Request&, httplib::Response& res) {
+    auto fallback = [&ctx](const httplib::Request& req, httplib::Response& res) {
         ScanRecord& rec = current_scan();
+        // 请求体检测。前置钩子拿不到 body(httplib 在 dispatch 时才读),
+        // 所以每个处理器在这里补一次。body 为空时立即返回,GET 零成本。
+        if (!scan_body(ctx, req, res, rec)) return;
         rec.status_code = 404;
         record_audit(ctx, rec);
         json_err(res, 404, "没有这个接口");
