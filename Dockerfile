@@ -41,9 +41,17 @@ COPY rules/ ./rules/
 # third_party 里有 cpp-httplib(header-only),漏了这一个目录 app 就编不过
 COPY third_party/ ./third_party/
 
-# 编译(-j 用满核心)
+# 并行编译的作业数。**默认 2 而不是 nproc**:
+#   这个项目里 httplib 和 nlohmann/json 都是重模板,单个 g++ 进程
+#   峰值能吃到 500MB~1GB。2 核 2G 的机器上如果按 nproc 开 2 路,
+#   再加上链接,很容易把内存打爆,表现为 build 阶段莫名其妙被杀。
+#   内存小的机器用 --build-arg BUILD_JOBS=1。
+ARG BUILD_JOBS=2
+
+# 只编 secguard 这一个目标。
+# 测试和基准在 CI 里跑,不需要进生产镜像;全量构建要多花一倍时间和内存。
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
- && cmake --build build -j"$(nproc)"
+ && cmake --build build --target secguard -j"${BUILD_JOBS}"
 
 # ---------------------------------------------------------------------------
 # 测试阶段:镜像构建时就能验证正确性
@@ -53,7 +61,8 @@ RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
 FROM builder AS test
 
 WORKDIR /src
-RUN ./build/ac_test 5000 && ./build/unit_test
+RUN cmake --build build --target ac_test unit_test -j"${BUILD_JOBS}" \
+ && ./build/ac_test 5000 && ./build/unit_test
 
 # ---------------------------------------------------------------------------
 # 第二阶段:运行
