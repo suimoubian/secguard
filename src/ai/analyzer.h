@@ -20,6 +20,7 @@
 
 #include "ai/llm_client.h"
 #include "ai/prompt.h"
+#include "ai/webhook.h"
 #include "db/dao.h"
 #include "util/config.h"
 
@@ -34,6 +35,8 @@ struct AnalyzerStats {
     long long transport_errors = 0;
     long long parse_errors = 0;
     long long alerts_created = 0;
+    long long notified = 0;
+    long long notify_failed = 0;
     long long skipped_low_confidence = 0;
     long long skipped_not_attack = 0;
     long long rate_limited = 0;
@@ -42,7 +45,9 @@ struct AnalyzerStats {
 
 class Analyzer {
 public:
-    Analyzer(LlmClient* client, Dao* dao, const AiConfig& cfg);
+    // notifier 可为 nullptr(不通知)
+    Analyzer(LlmClient* client, Dao* dao, const AiConfig& cfg,
+             Notifier* notifier = nullptr);
 
     // 跑一轮。返回本轮是否真的做了事(便于上层调度)。
     bool run_once();
@@ -63,6 +68,7 @@ private:
 
     LlmClient* client_ = nullptr;
     Dao*       dao_ = nullptr;
+    Notifier*  notifier_ = nullptr;
     AiConfig   cfg_;
     AnalyzerStats stats_;
 

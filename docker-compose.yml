@@ -140,6 +140,14 @@ services:
       SECGUARD_LLM_MODEL: ${SECGUARD_LLM_MODEL:-deepseek-chat}
       # 密钥从 .env 来,绝不出现在镜像或代码里
       SECGUARD_LLM_KEY: ${SECGUARD_LLM_KEY:-}
+
+      # ---- 告警通知 ----
+      # 留空 = 不通知(告警仍然落库)。
+      # 注意:如果端点在宿主机上,容器里要用 host.docker.internal 或网桥网关地址,
+      # 用 127.0.0.1 指的是容器自己。
+      SECGUARD_ALERT_WEBHOOK: ${SECGUARD_ALERT_WEBHOOK:-}
+      SECGUARD_ALERT_MIN_SEVERITY: ${SECGUARD_ALERT_MIN_SEVERITY:-HIGH}
+      SECGUARD_ALERT_TIMEOUT_MS: ${SECGUARD_ALERT_TIMEOUT_MS:-3000}
     networks: [backend]
     # 注意:这里**不**加 ports 映射。
     # 程序信任 X-Forwarded-For 头来取真实 IP,如果直接对外暴露,

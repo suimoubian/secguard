@@ -201,6 +201,26 @@ bool Config::load(Config& out, std::string& err) {
         return false;
     }
 
+    // --- 告警通知(第 65 讲) ---
+    out.webhook.url = env_str("SECGUARD_ALERT_WEBHOOK", "");
+    out.webhook.min_severity = env_str("SECGUARD_ALERT_MIN_SEVERITY",
+                                       out.webhook.min_severity);
+    if (!env_int("SECGUARD_ALERT_TIMEOUT_MS", out.webhook.timeout_ms)) {
+        err = "SECGUARD_ALERT_TIMEOUT_MS 不是整数";
+        return false;
+    }
+    if (severity_rank(out.webhook.min_severity) == 0) {
+        err = "SECGUARD_ALERT_MIN_SEVERITY 只能是 LOW/MEDIUM/HIGH/CRITICAL";
+        return false;
+    }
+    // 通知端点是可选功能,但配错了应该在启动时就知道,而不是等第一次告警
+    if (!out.webhook.url.empty()
+        && out.webhook.url.rfind("http://", 0) != 0
+        && out.webhook.url.rfind("https://", 0) != 0) {
+        err = "SECGUARD_ALERT_WEBHOOK 必须以 http:// 或 https:// 开头";
+        return false;
+    }
+
     // 合理性检查:不合法就拒绝启动,别带着错配置跑(第 67 讲)
     if (out.server.port <= 0 || out.server.port > 65535) { err = "SECGUARD_PORT 超出范围"; return false; }
     if (out.server.backlog <= 0) { err = "SECGUARD_BACKLOG 必须为正"; return false; }

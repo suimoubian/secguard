@@ -22,6 +22,7 @@
 
 #include "ai/analyzer.h"
 #include "ai/llm_client.h"
+#include "ai/webhook.h"
 #include "cache/distributed_guard.h"
 #include "cache/redis_client.h"
 #include "db/audit_writer.h"
@@ -145,7 +146,8 @@ int main() {
 
     // ---- 7. AI 分析层(第 59~63 讲) ----
     LlmClient llm(cfg.llm);
-    Analyzer analyzer(&llm, &dao, cfg.ai);
+    Notifier notifier(cfg.webhook);
+    Analyzer analyzer(&llm, &dao, cfg.ai, &notifier);
     if (!cfg.ai.enabled) {
         LOG_INFO(kTag, "AI 分析层未启用(设 SECGUARD_AI_ENABLE=1 打开)");
     } else if (!llm.available()) {

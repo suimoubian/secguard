@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "ai/llm_client.h"
+#include "ai/webhook.h"
 #include "cache/redis_client.h"
 
 namespace secguard {
@@ -115,6 +116,7 @@ struct Config {
     AuditConfig    audit;
     LlmConfig      llm;
     AiConfig       ai;
+    WebhookConfig  webhook;
     std::string    log_level = "info";  // debug|info|warn|error(第 68 讲)
 
     // 从环境变量装载。缺失必填项时返回 false 并说明原因。

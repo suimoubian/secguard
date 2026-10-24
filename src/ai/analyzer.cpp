@@ -21,8 +21,9 @@ std::int64_t now_ms() {
 // ---------------------------------------------------------------------------
 // Analyzer
 // ---------------------------------------------------------------------------
-Analyzer::Analyzer(LlmClient* client, Dao* dao, const AiConfig& cfg)
-    : client_(client), dao_(dao), cfg_(cfg) {
+Analyzer::Analyzer(LlmClient* client, Dao* dao, const AiConfig& cfg,
+                   Notifier* notifier)
+    : client_(client), dao_(dao), notifier_(notifier), cfg_(cfg) {
     if (cfg_.enabled && (!client_ || !client_->available())) {
         LOG_WARN(kTag, "分析层已启用但 LLM 不可用,自动跳过(检查 SECGUARD_LLM_KEY)");
     } else if (cfg_.enabled) {
@@ -169,6 +170,12 @@ bool Analyzer::do_round(int batch, bool manual) {
                 ++alerts;
                 LOG_INFO(kTag, "已生成告警 id=", new_id, " ip=", ip,
                          " 类型=", a.threat_type, " 置信度=", a.confidence);
+                // 推一次通知。失败不影响流程 —— 告警已经落库了,
+                // 通知只是"让人尽快知道",不是可靠投递。
+                if (notifier_ && notifier_->enabled()) {
+                    if (notifier_->notify(a, new_id)) ++stats_.notified;
+                    else ++stats_.notify_failed;
+                }
             } else {
                 LOG_ERROR(kTag, "写告警失败 ip=", ip);
                 continue;   // 写失败就不标记,下轮再试

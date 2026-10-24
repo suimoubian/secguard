@@ -87,6 +87,7 @@ set(SG_APP_SOURCES
     src/ai/llm_client.cpp
     src/ai/prompt.cpp
     src/ai/analyzer.cpp
+    src/ai/webhook.cpp
     src/net/app_context.cpp
     src/net/http_server.cpp
     src/net/handlers_auth.cpp
