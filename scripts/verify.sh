@@ -323,7 +323,34 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-sec "11. 限流与封禁(会产生拦截,最后测)"
+sec "11. Prometheus 指标"
+# ---------------------------------------------------------------------------
+if [ -n "$ATOK" ]; then
+    c=$(acode "$BASE/metrics")
+    [ "$c" = "200" ] && ok "指标接口可用" || bad "指标接口" "HTTP $c"
+
+    m=$(curl -s --max-time 10 -H "Authorization: Bearer $ATOK" "$BASE/metrics" 2>/dev/null)
+    echo "$m" | grep -q '^secguard_up 1' \
+        && ok "指标内容正确(secguard_up)" || bad "指标内容" "缺少 secguard_up"
+
+    n_metrics=$(echo "$m" | grep -cE '^secguard_[a-z_]+ [0-9.e+-]+$' || true)
+    [ "${n_metrics:-0}" -ge 20 ] && ok "导出 ${n_metrics} 个指标" \
+        || bad "指标数量" "只有 ${n_metrics} 个"
+
+    # 格式:除注释和空行外,每行必须是 "名字 数值"
+    n_bad=$(echo "$m" | grep -vE '^#|^$' \
+            | grep -vcE '^[a-zA-Z_:][a-zA-Z0-9_:]* -?[0-9.e+-]+$' || true)
+    [ "${n_bad:-0}" -eq 0 ] && ok "格式符合 Prometheus 约定" \
+        || bad "指标格式" "有 ${n_bad} 行不合规"
+
+    c=$(code "$BASE/metrics")
+    [ "$c" = "401" ] && ok "指标接口需要令牌(401)" || bad "指标接口鉴权" "HTTP $c"
+else
+    skip "Prometheus 指标" "无管理员令牌"
+fi
+
+# ---------------------------------------------------------------------------
+sec "12. 限流与封禁(会产生拦截,最后测)"
 # ---------------------------------------------------------------------------
 echo "  用并发请求压限流..."
 n429=0

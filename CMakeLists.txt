@@ -92,7 +92,8 @@ set(SG_APP_SOURCES
     src/net/http_server.cpp
     src/net/handlers_auth.cpp
     src/net/handlers_content.cpp
-    src/net/handlers_audit.cpp)
+    src/net/handlers_audit.cpp
+    src/net/metrics.cpp)
 set(SG_APP_SOURCES_EXISTING "")
 foreach(f ${SG_APP_SOURCES})
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${f})

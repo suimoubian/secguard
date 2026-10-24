@@ -34,17 +34,18 @@
 | W6 | **AI 分析层**(LLM 接入、结构化输出、置信度过滤) | ✅ 完成 |
 | W7 | Docker 部署、压测 | ✅ **完成** |
 | W8 | 文档与讲稿 | ✅ **完成** |
-| W9 | 管理鉴权、白名单、告警通知、CI、DAO 测试 | ✅ **完成** |
+| W9 | 管理鉴权、白名单、告警通知、CI、DAO 测试、Prometheus 指标 | ✅ **完成** |
 
-规模:**60 余个文件、约 7500 行源码**,自检 49 项全过。
+规模:**70 余个文件、约 8100 行源码**,自检 53 项全过。
 
-### W9 补的四件事(都是"能不能真用"的缺口)
+### W9 补的五件事(都是"能不能真用"的缺口)
 
 | 事项 | 解决的问题 |
 |---|---|
 | **管理接口鉴权** | 原来 `/api/alerts`、`/api/analyze/run`、`/api/rules/reload` 全是裸的,连"把告警标成误报"都能匿名调用 —— 等于让攻击者自己删证据。现在按用户名名单鉴权,**名单为空则管理接口全关**(fail-closed) |
 | **白名单** | 正常业务内容被误拦(如技术博客正文里的 `select * from user`)。按 **(路径, 规则)** 放行,不按内容放行 —— 后者等于给攻击者一个可伪造的通行证 |
 | **告警通知** | 告警只写数据库,没人会去看。新增 webhook 推送(通用 JSON,默认只推 HIGH 及以上) |
+| **Prometheus 指标** | 原来只有给人看的 JSON,机器看不懂、也没法看时间序列。新增 `/metrics`(27 个指标),含现成的抓取与告警规则示例 |
 | **CI + DAO 测试** | 保证每次提交能编过、自检能过;DAO 层从"只有端到端覆盖"变成有独立断言 |
 
 顺带修了一个**严重的检测盲区**:原先前置钩子在读取请求体之前就执行了
@@ -254,6 +255,23 @@ curl -H "Authorization: Bearer $TOKEN" $BASE/api/alerts
 
 未配置 `SECGUARD_ADMIN_USERS` 时管理接口**全部关闭**(fail-closed),
 不会出现"忘了配等于没锁"。
+
+### 可观测性
+
+| 接口 | 给谁看 | 内容 |
+|---|---|---|
+| `/health` | 编排系统 | 存活 + 数据库/Redis 连通性(健康检查会真去 ping) |
+| `/api/audit/stats` 等 | 人 | JSON,便于直接读 |
+| `/metrics` | 机器 | Prometheus 文本格式,27 个指标(请求量、拦截量、连接池、审计队列、Redis 状态、AI 调用与通知) |
+
+`/metrics` 同样需要管理员令牌。现成的抓取配置与 5 条告警规则在
+[docs/prometheus.yml.example](docs/prometheus.yml.example),包括:
+
+- `SecGuardDown` —— 服务挂了
+- `SecGuardRedisDegraded` —— Redis 降级(多实例时限流会各管各的)
+- `SecGuardAuditDropping` —— 审计队列开始丢数据
+- `SecGuardBlockRateSpike` —— 拦截率突增(要么被打,要么规则误报)
+- `SecGuardLlmFailing` —— LLM 大量失败
 
 ## 技术栈
 

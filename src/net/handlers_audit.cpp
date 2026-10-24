@@ -1,9 +1,10 @@
-// 审计接口:统计 / 按 IP 查拦截记录 / 特征库信息 / 热加载
+// 审计接口:统计 / 按 IP 查拦截记录 / 特征库信息 / 热加载 / Prometheus 指标
 // 对应寓言集第 50(索引)、56(防篡改)、14(热加载)讲
 #include "net/http_server.h"
 
 #include <nlohmann/json.hpp>
 
+#include "net/metrics.h"
 #include "util/log.h"
 
 namespace secguard {
@@ -361,6 +362,25 @@ void register_audit_routes(httplib::Server& svr, AppContext& ctx) {
         rec.status_code = 200;
         record_audit(ctx, rec);
         json_ok(res, j.dump());
+    });
+
+    // ---- Prometheus 指标 ----
+    //
+    // 返回文本格式而不是 JSON:这是事实标准,采集器直接能用。
+    // 它和别的人看的接口不同 —— 这个接口是给机器看的,
+    // 所以 Content-Type 是 text/plain 而不是 application/json。
+    svr.Get("/metrics", [&ctx](const httplib::Request& req, httplib::Response& res) {
+        ScanRecord& rec = current_scan();
+        if (!scan_body(ctx, req, res, rec)) return;
+        // 指标里有请求量、连接池占用这些运营信息,和别的人管理接口一样要令牌。
+        // Prometheus 的抓取配置里可以带 bearer_token,不影响自动化。
+        std::string admin;
+        if (!require_admin(ctx, req, res, admin)) return;
+
+        res.status = 200;
+        res.set_content(render_metrics(ctx), "text/plain; version=0.0.4; charset=utf-8");
+        rec.status_code = 200;
+        record_audit(ctx, rec);
     });
 }
 

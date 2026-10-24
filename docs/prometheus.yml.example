@@ -1,0 +1,59 @@
+# Prometheus 抓取配置示例
+#
+# 放到 prometheus.yml 的 scrape_configs 里。
+#
+# 为什么要带 bearer_token:/metrics 和别的人看的接口一样要求管理员令牌 ——
+# 指标里有请求量、连接池占用、封禁次数这些运营信息,不该匿名可读。
+#
+# 怎么拿长期令牌:
+#   用管理员账号登录一次,拿到的 JWT 有效期是 SECGUARD_TOKEN_TTL(默认 2 小时)。
+#   要长期采集,两个办法:
+#     a) 把 TTL 调长(比如 30 天),缺点是令牌泄露后窗口也长
+#     b) 定期重新登录并热更新配置(真实环境常用,但要多写一个同步脚本)
+#   演示项目用 a) 就够了,但要知道这是有代价的简化。
+
+scrape_configs:
+  - job_name: 'secguard'
+    scrape_interval: 15s
+    metrics_path: /metrics
+
+    authorization:
+      type: Bearer
+      credentials: '<把管理员的 JWT 粘这里>'
+
+    static_configs:
+      - targets: ['139.199.x.x:8088']
+
+# ---------------------------------------------------------------------------
+# 建议配的几条告警规则(Prometheus 的 alerting rules)
+# ---------------------------------------------------------------------------
+#
+# groups:
+#   - name: secguard
+#     rules:
+#       # 服务挂了
+#       - alert: SecGuardDown
+#         expr: up{job="secguard"} == 0
+#         for: 1m
+#
+#       # Redis 降级了:限流和封禁变成各实例各管各的,多实例时防护会失效
+#       - alert: SecGuardRedisDegraded
+#         expr: secguard_guard_mode_redis == 0
+#         for: 2m
+#
+#       # 审计队列开始丢数据(队列满):说明写入跟不上,可能要调大批量或加索引
+#       - alert: SecGuardAuditDropping
+#         expr: rate(secguard_audit_dropped_total[5m]) > 0
+#         for: 1m
+#
+#       # 拦截率突然升高:要么真被打,要么规则误报
+#       - alert: SecGuardBlockRateSpike
+#         expr: |
+#           rate(secguard_requests_blocked_total[5m])
+#           / rate(secguard_requests_total[5m]) > 0.3
+#         for: 5m
+#
+#       # LLM 调用大量失败:Key 过期、额度用完、或者网络不通
+#       - alert: SecGuardLlmFailing
+#         expr: rate(secguard_ai_call_errors_total[10m]) > 0.1
+#         for: 10m
