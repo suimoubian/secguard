@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "aho_corasick.h"
+#include "engine/normalize.h"
 #include "util/config.h"
 
 namespace secguard {
@@ -30,8 +31,12 @@ struct Rule {
 struct MatchResult {
     std::vector<std::int32_t> rule_indices;   // 命中的规则下标(去重、有序)
     std::size_t max_matched_len = 0;          // 最长命中长度,落 audit_log.matched_len
-    std::size_t scanned_bytes = 0;
+    std::size_t scanned_bytes = 0;            // 两遍加起来实际扫过的字节数
     bool truncated = false;                   // 命中数超上限被截断(第 25 讲)
+
+    // 以下两项用于观测"归一化遍到底有没有生效",不影响判定结果
+    bool        canonical_pass = false;       // 第二遍是否真的跑了(规范形与原文不同)
+    std::size_t canonical_bytes = 0;          // 第二遍扫了多少字节
 };
 
 // 一整套规则 + 建好的表。只读,换表时整体替换。
@@ -76,6 +81,11 @@ public:
     [[nodiscard]] std::size_t allowlist_size() const;
 
     // 匹配一段文本。返回命中的规则下标。
+    //
+    // 两遍取并集(项目 A):
+    //   第 1 遍:原样文本(只小写),行为和加归一化层之前**完全一致**;
+    //   第 2 遍:canonicalize() 还原编码/剥离注释/压缩空白后再匹配一次。
+    // 关闭 engine.extra_normalization 就只剩第 1 遍,用于消融实验。
     [[nodiscard]] MatchResult search(std::string_view text) const;
 
     [[nodiscard]] std::size_t rule_count() const;
@@ -95,7 +105,14 @@ private:
         std::vector<Rule> rules;
         std::size_t max_hits = 512;
         std::vector<AllowEntry> allowlist;
+        bool             extra_normalization = true;   // 是否跑第 2 遍
+        NormalizeOptions nopt;
     };
+
+    // 对一段文本跑一遍自动机,把结果并进 hits(两遍共用同一份上限与去重口径)
+    void scan_into(std::string_view text, const Snapshot& snap,
+                   std::vector<std::int32_t>& hits, std::size_t& max_len,
+                   std::size_t& bytes, bool& truncated) const;
 
     [[nodiscard]] std::shared_ptr<const Snapshot> current() const {
         return std::atomic_load_explicit(&snapshot_, std::memory_order_acquire);

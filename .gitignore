@@ -19,6 +19,8 @@ cmake-build-*/
 *.swo
 *~
 compile_commands.json
+# Office 打开文档时生成的锁文件(~$xxx.docx),不是内容
+~$*
 
 # ---- 本机密文:绝不提交 ----
 # 数据库口令、LLM API Key 一律走环境变量或本地配置文件

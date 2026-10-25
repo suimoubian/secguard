@@ -101,6 +101,12 @@ bool Config::load(Config& out, std::string& err) {
     if (!env_size("SECGUARD_MAX_TEXT", out.engine.max_text_bytes)) { err = "SECGUARD_MAX_TEXT 不是整数"; return false; }
     if (!env_size("SECGUARD_MAX_HITS", out.engine.max_hits)) { err = "SECGUARD_MAX_HITS 不是整数"; return false; }
     if (!env_int("SECGUARD_RELOAD_SEC", out.engine.reload_interval_seconds)) { err = "SECGUARD_RELOAD_SEC 不是整数"; return false; }
+    // 归一化遍:默认开。设成 0 可回滚到"只做字面匹配"(用于消融实验和线上止损)。
+    out.engine.extra_normalization = env_str("SECGUARD_ENGINE_NORMALIZE", "1") == "1";
+    if (!env_int("SECGUARD_ENGINE_NORMALIZE_ROUNDS", out.engine.normalize_decode_rounds)) {
+        err = "SECGUARD_ENGINE_NORMALIZE_ROUNDS 不是整数";
+        return false;
+    }
 
     // --- 日志 ---
     out.log_level = env_str("SECGUARD_LOG_LEVEL", out.log_level);
@@ -226,6 +232,10 @@ bool Config::load(Config& out, std::string& err) {
     if (out.server.backlog <= 0) { err = "SECGUARD_BACKLOG 必须为正"; return false; }
     if (out.engine.max_pattern_len == 0) { err = "SECGUARD_MAX_PATTERN_LEN 必须为正"; return false; }
     if (out.engine.max_text_bytes == 0)  { err = "SECGUARD_MAX_TEXT 必须为正"; return false; }
+    if (out.engine.normalize_decode_rounds < 0 || out.engine.normalize_decode_rounds > 8) {
+        err = "SECGUARD_ENGINE_NORMALIZE_ROUNDS 必须在 0..8 之间";
+        return false;
+    }
     if (out.guard.rate_per_sec <= 0)     { err = "SECGUARD_RATE_PER_SEC 必须为正"; return false; }
     if (out.guard.hit_threshold <= 0)    { err = "SECGUARD_HIT_THRESHOLD 必须为正"; return false; }
     if (out.redis.pool_size <= 0)        { err = "SECGUARD_REDIS_POOL 必须为正"; return false; }

@@ -236,3 +236,24 @@ c:/windows	PAT-032	PATH_TRAVERSAL	MEDIUM
 /root/.ssh	PAT-033	PATH_TRAVERSAL	CRITICAL
 /home/	PAT-034	PATH_TRAVERSAL	MEDIUM
 /var/www	PAT-035	PATH_TRAVERSAL	MEDIUM
+
+# ---------------------------------------------------------------------------
+# 项目 A 补充:归一化之后才收敛出来的变形族(NORM-*)
+#
+# 这一节的存在本身就是归一化层的意义:
+#   `java\nscript:` / `java\tscript:` / `java%20script:` / `java%0Ascript:`
+#   在原始文本里是**无穷多种写法**,没法逐条写规则;
+#   但归一化把任意空白都折叠成一个空格之后,它们全部收敛成
+#   `java script:` —— 于是**一条规则覆盖整个变形族**。
+#
+# 这些特征在原样文本里几乎不会出现(正常内容不会写 "java script:"),
+# 所以它们是低误报的。这也说明了加规则和加归一化的分工:
+#   归一化负责"把变形收敛成有限几种形状",规则负责"认出这几种形状"。
+#   只加规则不归一化,就得为每种编码各写一条,永远写不完。
+# ---------------------------------------------------------------------------
+java script:	NORM-001	XSS	HIGH
+vb script:	NORM-002	XSS	HIGH
+sleep (	NORM-003	SQL_INJECTION	HIGH
+benchmark (	NORM-004	SQL_INJECTION	HIGH
+||1=1	NORM-005	SQL_INJECTION	HIGH
+|| 1=1	NORM-006	SQL_INJECTION	HIGH

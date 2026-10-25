@@ -110,6 +110,81 @@ int main() {
         }
     }
 
+    std::printf("\n=== 3b. 归一化层(项目 A) ===\n");
+    {
+        // 规范形的逐条行为。这些用例就是"归一化层的规格"
+        NormalizeOptions opt;
+        struct NC { const char* in; const char* want; const char* why; };
+        const NC ncs[] = {
+            {"1%20union%20select",      "1 union select",      "百分号编码空格"},
+            {"1%2520or%25201=1",        "1 or 1=1",            "双层编码"},
+            {"%3Cscript",               "<script",             "整段编码"},
+            {"&#x3c;script",            "<script",             "HTML 十六进制实体"},
+            {"&#60;script",             "<script",             "HTML 十进制实体"},
+            {"\\u003cscript",           "<script",             "JSON/JS 转义"},
+            {"\\x3cscript",             "<script",             "JS 十六进制转义"},
+            {"union/**/select",         "union select",        "块注释等价空白"},
+            {"/*!50000union*/ select",  "union select",        "MySQL 版本注释保留内容"},
+            {"a%09b%0Ac",               "a b c",               "制表符/换行折叠成空格"},
+            {"a  b",                    "a b",                 "连续空格折叠"},
+            {"..%00/",                  "../",                 "NUL 字节剔除"},
+            {"..%5c..%5c",              "..\\..\\",            "反斜杠路径分隔"},
+            {"java%0Ascript:1",         "java script:1",       "URL 里的空白打断 scheme"},
+            {"SELECT * FROM t",         "select * from t",     "转小写"},
+            // 回归:行注释必须保留。规则库里有 `order by 1--` 这种把注释
+            // 写进特征本体的规则,剥掉 `--` 会让它们永远命中不了。
+            {"order by 1--",            "order by 1--",        "行注释不被剥离(关键回归)"},
+            {"1' or 1=1#",              "1' or 1=1#",          "井号不被剥离"},
+        };
+        for (const auto& c : ncs) {
+            const std::string got = canonicalize(c.in, opt);
+            char buf[256];
+            std::snprintf(buf, sizeof(buf), "归一化 %-24s -> %s", c.why, c.want);
+            if (got != c.want) {
+                std::printf("    期望 [%s] 实际 [%s]\n", c.want, got.c_str());
+            }
+            check(got == c.want, buf);
+        }
+
+        // 快路预判:没有变形标记的文本不该多付一遍扫描
+        check(!may_obfuscate("plain text /api/posts"), "快路:纯文本不触发");
+        check(!may_obfuscate("a&b=1"),                 "快路:单个 & 不触发");
+        check(may_obfuscate("a%20b"),                  "快路:百分号触发");
+        check(may_obfuscate("&lt;"),                   "快路:命名实体触发");
+        check(may_obfuscate("a  b"),                   "快路:连续空格触发");
+        check(may_obfuscate("x/*y"),                   "快路:块注释触发");
+
+        // 端到端:同一个载荷,关归一化漏、开归一化中
+        const std::vector<Rule> rules = {
+            {"union select", "E2E-1", "SQL_INJECTION", "HIGH"},
+            {"order by 1--", "E2E-2", "SQL_INJECTION", "MEDIUM"},
+        };
+        EngineConfig bc;
+        bc.extra_normalization = false;
+        EngineConfig hc;
+        hc.extra_normalization = true;
+        Engine be;
+        Engine he;
+        std::string e;
+        check(be.build_from_rules(rules, bc, e), "基线引擎建表(关归一化)");
+        check(he.build_from_rules(rules, hc, e), "加固引擎建表(开归一化)");
+
+        const std::string enc = "PATH:/p\nQUERY:id=1%20union%20select%201\n";
+        check(be.search(enc).rule_indices.empty(),   "基线:编码载荷漏报(这就是绕过)");
+        check(!he.search(enc).rule_indices.empty(),  "加固:同一载荷命中");
+        check(he.search(enc).canonical_pass,         "加固:第二遍确实执行了");
+
+        const std::string plain = "PATH:/p\nQUERY:id=1 union select 1\n";
+        check(!be.search(plain).rule_indices.empty(), "基线:明文载荷命中");
+        const auto pm = he.search(plain);
+        check(!pm.rule_indices.empty(),               "加固:明文载荷仍然命中");
+        check(!pm.canonical_pass,                     "加固:明文无变形标记,走快路");
+
+        const std::string benign = "PATH:/static/js/app.js\nQUERY:page=2\n";
+        check(he.search(benign).rule_indices.empty(), "加固:正常请求不误报");
+        check(!he.search(benign).canonical_pass,      "加固:正常请求走快路");
+    }
+
     std::printf("\n=== 4. HTTP -> 待检文本 ===\n");
     {
         bool truncated = false;

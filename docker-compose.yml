@@ -122,6 +122,10 @@ services:
       SECGUARD_TRUST_PROXY: "1"
 
       SECGUARD_PATTERN_FILE: /app/rules/attack_patterns.txt
+      # 归一化检测层(项目 A):1 = 原始遍 + 归一化遍,0 = 只做字面匹配。
+      # 设 0 可以一键回滚到改造前的行为 —— 线上真出问题,先关它再查原因,
+      # 而不是回滚镜像。做 A/B 性能对照也用它。
+      SECGUARD_ENGINE_NORMALIZE: ${SECGUARD_ENGINE_NORMALIZE:-1}
       SECGUARD_RATE_PER_SEC: ${SECGUARD_RATE_PER_SEC:-200}
       SECGUARD_RATE_BURST: ${SECGUARD_RATE_BURST:-400}
       SECGUARD_HIT_THRESHOLD: ${SECGUARD_HIT_THRESHOLD:-20}

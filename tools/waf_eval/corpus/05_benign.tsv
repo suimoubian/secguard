@@ -1,0 +1,52 @@
+// 正常流量语料(误报的分子分母)
+// 列: id	类别	手法	位置	载荷	来源基线
+// 这里刻意放了一批"看起来像特征、其实是正常内容"的样本 ——
+// 规则库里 `#`、`0x`、`select`、`/home/` 这几条超宽规则一定会在这里露出来。
+ben-01	BENIGN	query-normal	query	id=1&page=2&sort=desc	-
+ben-02	BENIGN	urlencoded-cjk	query	q=%E4%B8%AD%E6%96%87%E6%90%9C%E7%B4%A2&page=1	-
+ben-03	BENIGN	plus-as-space	query	q=hello+world+test	-
+ben-04	BENIGN	markdown-heading	body	{"content":"# 第一章 概述"}	-
+ben-05	BENIGN	csharp-text	body	{"content":"C# 入门教程,从零开始"}	-
+ben-06	BENIGN	css-color	body	{"color":"#FF0000","background":"#00FF00"}	-
+ben-07	BENIGN	hex-literal	body	{"code":"int mask = 0x1f; uint flag = 0xFF;"}	-
+ben-08	BENIGN	english-prose	body	{"content":"the union select committee met today"}	-
+ben-09	BENIGN	data-uri-image	body	{"img":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="}	-
+ben-10	BENIGN	static-path	path	/home/index.html	-
+ben-11	BENIGN	static-path	path	/var/www/html/index.html	-
+ben-12	BENIGN	static-path	path	/static/js/app.js	-
+ben-13	BENIGN	file-param	query	file=readme.txt&ref=/docs/guide	-
+ben-14	BENIGN	urlencoded-name	query	name=%E5%BC%A0%E4%B8%89&age=20	-
+ben-15	BENIGN	shell-var-text	query	q=${HOME}/data	-
+ben-16	BENIGN	arithmetic	query	q=1+1=2&from=calc	-
+ben-17	BENIGN	paren-call	query	q=or(1)&limit=10	-
+ben-18	BENIGN	dashes	query	q=a-b--c&mode=raw	-
+ben-19	BENIGN	sql-in-docs	body	{"sql":"select * from users where id = 1"}	-
+ben-20	BENIGN	compare-symbol	query	q=0%20%3C%201	-
+ben-21	BENIGN	browser-ua	ua	Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36	-
+ben-22	BENIGN	bot-ua	ua	Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)	-
+ben-23	BENIGN	keyword-update	query	q=update&type=patch	-
+ben-24	BENIGN	array-param	query	ids%5B0%5D=1&ids%5B1%5D=2	-
+ben-25	BENIGN	encoded-api-path	query	next=%2Fapi%2Fposts%3Fpage%3D2	-
+ben-26	BENIGN	encoded-arithmetic	query	q=1%2B1%3D2	-
+ben-27	BENIGN	english-password-rule	body	{"content":"password must be at least 8 characters"}	-
+ben-28	BENIGN	keyword-union	query	q=union&type=org	-
+ben-29	BENIGN	keyword-alert	query	q=alert&level=warn	-
+ben-30	BENIGN	keyword-script	query	q=script&lang=zh	-
+ben-31	BENIGN	html-bold	query	q=%3Cb%3Ebold%3C%2Fb%3E	-
+ben-32	BENIGN	html-div	query	q=%3Cdiv%20class%3Dx%3Ehello%3C%2Fdiv%3E	-
+ben-33	BENIGN	relative-file	query	file=../../docs/readme.md	-
+ben-34	BENIGN	literal-dots	query	q=%2e%2e&note=dots	-
+ben-35	BENIGN	relative-src	query	path=.%2Fsrc%2Fmain.cpp	-
+ben-36	BENIGN	sql-in-announcement	body	{"content":"SELECT * FROM orders WHERE status = 2"}	-
+ben-37	BENIGN	markdown-install	body	{"content":"## 安装说明\n\n运行 make 即可"}	-
+ben-38	BENIGN	urlencoded-cjk-2	query	q=%E6%9C%8D%E5%8A%A1%E5%99%A8%E5%90%AF%E5%8A%A8%E6%88%90%E5%8A%9F	-
+ben-39	BENIGN	python-ua	ua	python-requests/2.31.0	-
+ben-40	BENIGN	semicolon-only	query	q=;&mode=empty	-
+ben-41	BENIGN	shell-ls	body	{"cmd":"ls -la /tmp"}	-
+ben-42	BENIGN	html-form-field	query	q=%3Cinput%20type%3Dtext%20name%3Dq%3E	-
+ben-43	BENIGN	or-with-number	query	q=1%20or%202&mode=b	-
+ben-44	BENIGN	git-rebase-text	body	{"content":"use git rebase to sync your branch"}	-
+ben-45	BENIGN	object-string	query	q=%5Bobject%20Object%5D	-
+ben-46	BENIGN	image-src	path	/uploads/2026/10/avatar-1024.png	-
+ben-47	BENIGN	json-nested	body	{"items":[{"id":1,"qty":2}],"total":3}	-
+ben-48	BENIGN	chinese-comment	body	{"content":"这段代码里用了 select 语句,注意参数化"}	-

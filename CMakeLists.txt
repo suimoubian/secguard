@@ -167,6 +167,17 @@ if(SG_APP_SOURCES_EXISTING)
 endif()
 
 # ---------------------------------------------------------------------------
+# 5) WAF 绕过评测器(项目 A)
+#
+# 只依赖引擎本身(不碰数据库/Redis/HTTP),所以任何机器上 `cmake --build`
+# 完就能跑。它同时充当"检测能力"的回归测试:规则改动前后各跑一次,
+# 漏报率和误报率的变化必须是可解释的。
+# ---------------------------------------------------------------------------
+add_executable(waf_eval tools/waf_eval/waf_eval.cpp ${SG_ENGINE_SOURCES})
+target_include_directories(waf_eval PRIVATE ${SG_INCLUDE_DIRS})
+target_link_libraries(waf_eval PRIVATE Threads::Threads)
+
+# ---------------------------------------------------------------------------
 # 测试注册
 # ---------------------------------------------------------------------------
 enable_testing()

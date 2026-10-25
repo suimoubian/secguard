@@ -1,0 +1,23 @@
+// 路径穿越语料
+// 列: id	类别	手法	位置	载荷	来源基线
+// 位置统一为 path:载荷就是请求路径本身。
+pat-b01	PATH_TRAVERSAL	baseline	path	/static/../../etc/passwd	-
+pat-b02	PATH_TRAVERSAL	baseline	path	/static/..%2f..%2fetc%2fpasswd	-
+pat-b03	PATH_TRAVERSAL	baseline	path	/static/....//....//etc/passwd	-
+pat-b04	PATH_TRAVERSAL	baseline	path	/files/../../etc/passwd	-
+pat-b05	PATH_TRAVERSAL	baseline	path	/files/..%5c..%5cwindows%5cwin.ini	-
+pat-b06	PATH_TRAVERSAL	baseline	path	/etc/passwd	-
+pat-b07	PATH_TRAVERSAL	baseline	path	/%2e%2e%2f%2e%2e%2fetc%2fpasswd	-
+// --- 变形 1:换编码形式 ---
+pat-v01	PATH_TRAVERSAL	percent-encode	path	/%2e%2e%5c%2e%2e%5cetc%5cpasswd	pat-b01
+pat-v02	PATH_TRAVERSAL	double-encode	path	/files/..%255c..%255cwindows%255cwin.ini	pat-b05
+pat-v03	PATH_TRAVERSAL	percent-encode	path	/%2fetc%2fpasswd	pat-b06
+pat-v04	PATH_TRAVERSAL	percent-encode	path	/static/....%2f%2f....%2f%2fetc%2fpasswd	pat-b03
+pat-v05	PATH_TRAVERSAL	percent-encode	path	/%2e%2e%2e%2e%5c%5c%2e%2e%2e%2e%5c%5cwindows%5cwin.ini	pat-b03
+pat-v06	PATH_TRAVERSAL	partial-encode	path	/etc/%70asswd	pat-b06
+pat-v07	PATH_TRAVERSAL	percent-encode	path	/%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fshadow	pat-b07
+// --- 变形 2:对照(这些原引擎就能拦,用来确认没有回归) ---
+pat-v08	PATH_TRAVERSAL	control	path	/files/..%2f..%2f..%2fetc%2fpasswd	pat-b02
+pat-v09	PATH_TRAVERSAL	control	path	/%252e%252e%252fetc%252fpasswd	pat-b07
+pat-v10	PATH_TRAVERSAL	control	path	/files/..%c0%af..%c0%afetc/passwd	pat-b01
+pat-v11	PATH_TRAVERSAL	control	path	/files/..%5c..%5c..%5cetc%5cpasswd	pat-b05

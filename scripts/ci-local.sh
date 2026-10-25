@@ -54,6 +54,19 @@ else
     bad "基准运行失败"
 fi
 
+step "5b. WAF 绕过评测(门禁)"
+# 为什么有这一步:加规则/改归一化,很容易"补一个漏报、带出三个误报"。
+# 光看报告看不出来,必须让数字自己卡住。阈值见 scripts/eval-waf.sh 的注释。
+if ./build-ci/waf_eval --rules rules/attack_patterns.txt \
+        --corpus tools/waf_eval/corpus --repeat 3 \
+        --max-miss 0.10 --max-fp 0.25 > /tmp/ci-eval.log 2>&1; then
+    ok "$(grep '变形样本有效' /tmp/ci-eval.log | sed 's/^[^:]*://')"
+    ok "$(grep '正常样本' /tmp/ci-eval.log | sed 's/^[^:]*://')"
+else
+    bad "评测门禁未通过"
+    grep -E '变形样本|正常样本|门禁' /tmp/ci-eval.log | head -6
+fi
+
 step "6. DAO 层测试(没有数据库会自动跳过)"
 if SECGUARD_DB_USER="${SECGUARD_DB_USER:-secguard}" \
    SECGUARD_DB_PASS="${SECGUARD_DB_PASS:-secguard_dev_2026}" \

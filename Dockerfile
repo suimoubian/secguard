@@ -40,6 +40,10 @@ COPY tests/ ./tests/
 COPY rules/ ./rules/
 # third_party 里有 cpp-httplib(header-only),漏了这一个目录 app 就编不过
 COPY third_party/ ./third_party/
+# tools/ 里有 waf_eval(项目 A 的评测器)。CMakeLists 里它是无条件目标,
+# 不拷这个目录 cmake 配置阶段就会报 "Cannot find source file" ——
+# 本地开发有目录、镜像里没有,这种"本机能编、镜像编不过"最容易漏。
+COPY tools/ ./tools/
 
 # 并行编译的作业数。**默认 2 而不是 nproc**:
 #   这个项目里 httplib 和 nlohmann/json 都是重模板,单个 g++ 进程
@@ -61,8 +65,11 @@ RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
 FROM builder AS test
 
 WORKDIR /src
-RUN cmake --build build --target ac_test unit_test -j"${BUILD_JOBS}" \
- && ./build/ac_test 5000 && ./build/unit_test
+RUN cmake --build build --target ac_test unit_test waf_eval -j"${BUILD_JOBS}" \
+ && ./build/ac_test 5000 && ./build/unit_test \
+ && ./build/waf_eval --rules rules/attack_patterns.txt \
+        --corpus tools/waf_eval/corpus --repeat 3 \
+        --max-miss 0.10 --max-fp 0.25
 
 # ---------------------------------------------------------------------------
 # 第二阶段:运行

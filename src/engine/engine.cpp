@@ -59,6 +59,9 @@ bool Engine::build_from_rules(std::vector<Rule> rules, const EngineConfig& cfg,
                               std::string& err) {
     auto snap = std::make_shared<Snapshot>();
     snap->max_hits = cfg.max_hits;
+    snap->extra_normalization = cfg.extra_normalization;
+    snap->nopt = NormalizeOptions{};
+    snap->nopt.max_decode_rounds = cfg.normalize_decode_rounds;
     snap->rules = std::move(rules);
 
     // 建表前预估节点数,预留避免扩容搬迁(第 22 讲)
@@ -95,7 +98,10 @@ bool Engine::build_from_rules(std::vector<Rule> rules, const EngineConfig& cfg,
     info << "建表完成:规则 " << snap->rules.size()
          << " 条,节点 " << snap->ac.node_count()
          << " 个,白名单 " << snap->allowlist.size()
-         << " 条,占用约 " << (snap->ac.memory_bytes() / 1024) << " KB";
+         << " 条,归一化 " << (snap->extra_normalization
+                               ? ("开(最多解 " + std::to_string(snap->nopt.max_decode_rounds) + " 层)")
+                               : std::string("关"))
+         << ",占用约 " << (snap->ac.memory_bytes() / 1024) << " KB";
     LOG_INFO(kTag, info.str());
 
     // 换成只读视图再发布:shared_ptr<Snapshot> -> shared_ptr<const Snapshot>
@@ -239,27 +245,52 @@ std::size_t Engine::allowlist_size() const {
     return snap ? snap->allowlist.size() : 0;
 }
 
+void Engine::scan_into(std::string_view text, const Snapshot& snap,
+                       std::vector<std::int32_t>& hits, std::size_t& max_len,
+                       std::size_t& bytes, bool& truncated) const {
+    bytes += text.size();
+    snap.ac.search(text, [&](const Hit& h) {
+        if (hits.size() >= snap.max_hits) { truncated = true; return; }
+        hits.push_back(h.pattern_id);
+        const std::size_t len =
+            snap.rules[static_cast<std::size_t>(h.pattern_id)].text.size();
+        if (len > max_len) max_len = len;
+    });
+}
+
 MatchResult Engine::search(std::string_view text) const {
     MatchResult out;
     const auto snap = current();
     if (!snap) return out;
 
-    // 归一化:只做一次(第 16 讲)
-    const std::string normalized = normalize(text);
-    out.scanned_bytes = normalized.size();
-
     std::vector<std::int32_t> hits;
     hits.reserve(16);
     std::size_t max_len = 0;
 
-    snap->ac.search(normalized, [&](const Hit& h) {
-        if (hits.size() >= snap->max_hits) { out.truncated = true; return; }
-        hits.push_back(h.pattern_id);
-        const std::size_t len = snap->rules[static_cast<std::size_t>(h.pattern_id)].text.size();
-        if (len > max_len) max_len = len;
-    });
+    // 第 1 遍:原始文本。行为和加归一化层之前完全一致(只多了一个小写化),
+    // 所以这一遍是零回归的保证 —— 已有 228 条规则能命中的,现在照样命中。
+    const std::string normalized = normalize(text);
+    std::size_t bytes = 0;
+    scan_into(normalized, *snap, hits, max_len, bytes, out.truncated);
+    out.scanned_bytes = bytes;
 
-    // 去重 + 排序:同一个规则在文本里命中多次只报一次(第 15 讲)
+    // 第 2 遍:规范形。把 %20 / /**/ / &#x6a; / \x3c 这些"同一个东西的不同写法"
+    // 收敛回原文,再匹配一次。
+    //
+    // 进这一遍之前先做一次带早退的标记扫描:文本里连一个变形标记都没有,
+    // 就不必建规范形字符串、也不必再扫一遍自动机。正常请求走的就是这条路。
+    if (snap->extra_normalization && may_obfuscate(text)) {
+        const std::string canonical = canonicalize(text, snap->nopt);
+        if (canonical != normalized) {
+            out.canonical_pass = true;
+            std::size_t cbytes = 0;
+            scan_into(canonical, *snap, hits, max_len, cbytes, out.truncated);
+            out.canonical_bytes = cbytes;
+            out.scanned_bytes += cbytes;
+        }
+    }
+
+    // 去重 + 排序:同一个规则在多处命中只报一次(第 15 讲)
     std::sort(hits.begin(), hits.end());
     hits.erase(std::unique(hits.begin(), hits.end()), hits.end());
 

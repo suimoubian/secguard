@@ -1,0 +1,46 @@
+// XSS 语料
+// 列: id	类别	手法	位置	载荷	来源基线
+//
+// 设计约束(踩过坑):每条基线必须只靠**一个**特征命中,变形样本也不能
+// 顺带带上别的特征。否则"变形样本被检出"可能来自另一个特征,量的东西
+// 就不是我想量的了。比如载荷里带 alert(1) 时,`alert(` 这条规则会兜住
+// 一切变形,XSS 标签规则测了等于没测。
+xss-b01	XSS	baseline	query	q=<script>	-
+xss-b02	XSS	baseline	query	q=<img src=x>	-
+xss-b03	XSS	baseline	query	q=<svg/>	-
+xss-b04	XSS	baseline	query	q=javascript:1	-
+xss-b05	XSS	baseline	query	q=<iframe src=x>	-
+xss-b06	XSS	baseline	query	q=<body>	-
+xss-b07	XSS	baseline	query	q=<details open>	-
+xss-b08	XSS	baseline	query	q=onerror=1	-
+xss-b09	XSS	baseline	query	q=<a href="javascript:1">1</a>	-
+xss-b10	XSS	baseline	query	q=<img src="data:text/html;base64,AAA">	-
+// --- 变形 1:标签名部分编码 ---
+xss-v01	XSS	partial-percent-encode	query	q=%3Cscr%69pt%3E	xss-b01
+xss-v02	XSS	partial-percent-encode	query	q=%3Csv%67%2F%3E	xss-b03
+xss-v03	XSS	partial-percent-encode	query	q=%3Cim%67%20src=x%3E	xss-b02
+xss-v04	XSS	partial-percent-encode	query	q=%3C%73cript%3E	xss-b01
+// --- 变形 2:HTML 实体(混用十进制与十六进制) ---
+xss-v05	XSS	html-entity	query	q=&#60;&#x73;cript&#62;	xss-b01
+xss-v06	XSS	html-entity	query	q=&#x3c;&#x73;&#x63;&#x72;&#x69;&#x70;&#x74;&#x3e;	xss-b01
+xss-v07	XSS	html-entity-scheme	query	q=java&#115;cript:1	xss-b04
+xss-v08	XSS	html-entity-attr	query	q=&#111;nerror=1	xss-b08
+// --- 变形 3:双层编码 ---
+xss-v09	XSS	double-encode	query	q=%253Cscript%253E	xss-b01
+xss-v10	XSS	double-encode	query	q=%253Cimg%2520src=x%253E	xss-b02
+// --- 变形 4:JS / JSON 转义 ---
+xss-v11	XSS	json-unicode-escape	body	{"c":"\u003cimg src=x\u003e"}	xss-b02
+xss-v12	XSS	js-hex-escape	body	{"c":"\x3cimg\x3e"}	xss-b02
+xss-v13	XSS	js-unicode-escape	body	{"c":"\u006fn\u0065rror=1"}	xss-b08
+// --- 变形 5:URL 里的空白与控制字符 ---
+xss-v14	XSS	whitespace-scheme	query	q=java%0Ascript:1	xss-b04
+xss-v15	XSS	whitespace-scheme	query	q=java%09script:1	xss-b04
+xss-v16	XSS	nul-byte	query	q=%3Cscript%00%3E	xss-b01
+xss-v17	XSS	form-urlencoded	body	content=%3Csvg%2F%3E	xss-b03
+// --- 变形 6:同语义改写(子串匹配的天花板,归一化救不了) ---
+xss-v18	XSS	equivalent-rewrite	query	q=top['al'+'ert'](1)	xss-b01
+xss-v19	XSS	equivalent-rewrite	query	q=window['ale'+'rt'](document['cookie'])	xss-b01
+// --- 变形 7:对照(两边都该拦住,用来证明小写化/原有编码规则没退化) ---
+xss-v20	XSS	control-case	query	q=<ScRiPt>	xss-b01
+xss-v21	XSS	control-percent	query	q=%3Cscript%3E	xss-b01
+xss-v22	XSS	control-js-hex	body	{"c":"\x3cscript"}	xss-b01

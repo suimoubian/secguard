@@ -1,0 +1,63 @@
+// SQL 注入语料
+// 列: id	类别	手法	位置	载荷	来源基线
+// 基线样本(baseline)是"原引擎确定能拦住"的明文写法;
+// 变形样本(v-*)每条只改一个维度,来源基线指向它改写前的那条。
+//
+// 说明:变形样本用 query 位置表达"URL 里的参数",这符合真实 HTTP 流量;
+// 原引擎扫的是未解码的 QUERY 原文(app_context.cpp:92),所以编码类变形
+// 在基线下会漏 —— 这正是要量化的东西。
+sqli-b01	SQL_INJECTION	baseline	query	id=1' or 1=1--	-
+sqli-b02	SQL_INJECTION	baseline	query	id=1 union select 1,2,3	-
+sqli-b03	SQL_INJECTION	baseline	query	id=1' and sleep(5)--	-
+sqli-b04	SQL_INJECTION	baseline	query	id=1' union all select null--	-
+sqli-b05	SQL_INJECTION	baseline	query	id=1' or '1'='1	-
+sqli-b06	SQL_INJECTION	baseline	query	id=1' and extractvalue(1,concat(0x7e,version()))--	-
+sqli-b07	SQL_INJECTION	baseline	query	id=1 into outfile '/tmp/x.php'	-
+sqli-b08	SQL_INJECTION	baseline	query	id=1' or 1=1#	-
+sqli-b09	SQL_INJECTION	baseline	query	id=1' order by 1--	-
+sqli-b10	SQL_INJECTION	baseline	query	id=1' and 1=1--	-
+sqli-b11	SQL_INJECTION	baseline	query	id=1' or 'a'='a	-
+sqli-b12	SQL_INJECTION	baseline	query	id=1' and benchmark(1000000,md5(1))--	-
+sqli-b13	SQL_INJECTION	baseline	query	id=1; exec xp_cmdshell 'whoami'--	-
+sqli-b14	SQL_INJECTION	baseline	query	id=1' or true--	-
+sqli-b15	SQL_INJECTION	baseline	query	id=1'; drop table users--	-
+sqli-b16	SQL_INJECTION	baseline	query	id=1' and updatexml(1,concat(0x7e,user()),1)--	-
+// --- 变形 1:空格编码成 %20 / %09 / + ---
+sqli-v01	SQL_INJECTION	percent-space	query	id=1'%20or%201=1--	sqli-b01
+sqli-v02	SQL_INJECTION	plus-space	query	id=1'+or+1=1--	sqli-b01
+sqli-v03	SQL_INJECTION	percent-space	query	id=1%20union%20select%201,2,3	sqli-b02
+sqli-v04	SQL_INJECTION	tabular-space	query	id=1%09union%09select%091	sqli-b02
+sqli-v05	SQL_INJECTION	newline-space	query	id=1%0aunion%0aselect%0a1	sqli-b02
+sqli-v06	SQL_INJECTION	percent-space	query	id=1'%20and%20sleep(5)--	sqli-b03
+sqli-v07	SQL_INJECTION	percent-space	query	id=1'%20union%20all%20select%20null--	sqli-b04
+sqli-v08	SQL_INJECTION	percent-space	query	id=1'%20or%20'1'='1	sqli-b05
+sqli-v09	SQL_INJECTION	tabular-space	query	id=1'%09or%09'1'='1	sqli-b05
+sqli-v10	SQL_INJECTION	percent-space	query	id=1%20into%20outfile%20'/tmp/x.php'	sqli-b07
+sqli-v11	SQL_INJECTION	percent-space	query	id=1'%20order%20by%201--	sqli-b09
+sqli-v12	SQL_INJECTION	percent-space	query	id=1'%20and%201=1--	sqli-b10
+sqli-v13	SQL_INJECTION	percent-space	query	id=1'%20or%20true--	sqli-b14
+sqli-v14	SQL_INJECTION	percent-space	query	id=1'%20and%20benchmark(1000000,md5(1))--	sqli-b12
+sqli-v15	SQL_INJECTION	percent-space	query	id=1'%20or%20'a'='a	sqli-b11
+// --- 变形 2:注释即空白 ---
+sqli-v16	SQL_INJECTION	sql-comment	query	id=1'/**/or/**/1=1--	sqli-b01
+sqli-v17	SQL_INJECTION	sql-comment	query	id=1%20union/**/select%201	sqli-b02
+sqli-v18	SQL_INJECTION	sql-comment	query	id=1'%20union/**/all/**/select/**/null--	sqli-b04
+sqli-v19	SQL_INJECTION	sql-comment	query	id=1'%20order/**/by/**/1--	sqli-b09
+sqli-v20	SQL_INJECTION	mysql-version-comment	query	id=1%20/*!50000union*/%20/*!50000select*/%201	sqli-b02
+sqli-v21	SQL_INJECTION	sql-comment	query	id=1%20into/**/outfile%20'/tmp/x.php'	sqli-b07
+// --- 变形 3:关键词部分编码 ---
+sqli-v22	SQL_INJECTION	keyword-percent-encode	query	id=1%20%75nion%20%73elect%201	sqli-b02
+sqli-v23	SQL_INJECTION	keyword-percent-encode	query	id=1'%20%6fr%201=1--	sqli-b01
+sqli-v24	SQL_INJECTION	keyword-percent-encode	query	id=1'%20and%20%73leep(5)--	sqli-b03
+// --- 变形 4:双层编码 ---
+sqli-v25	SQL_INJECTION	double-encode	query	id=1'%2520or%25201=1--	sqli-b01
+sqli-v26	SQL_INJECTION	double-encode	query	id=1%2520union%2520select%25201	sqli-b02
+sqli-v27	SQL_INJECTION	double-encode	query	id=1'%2520and%2520sleep(5)--	sqli-b03
+// --- 变形 5:等价语法(归一化救不了,用来量"规则本身的覆盖缺口") ---
+sqli-v28	SQL_INJECTION	equivalent-syntax	query	id=1'||1=1--	sqli-b01
+sqli-v29	SQL_INJECTION	equivalent-syntax	query	id=1'%20or%202>1--	sqli-b01
+sqli-v30	SQL_INJECTION	equivalent-syntax	query	id=1'%20or%201%20like%201--	sqli-b05
+sqli-v31	SQL_INJECTION	function-space	query	id=1'%20and%20sleep%20(5)--	sqli-b03
+sqli-v32	SQL_INJECTION	function-comment	query	id=1'%20and%20sleep/**/(5)--	sqli-b03
+sqli-v33	SQL_INJECTION	trailing-comment-removed	query	id=1'%20or%201=1	sqli-b01
+sqli-v34	SQL_INJECTION	case-mixed	query	id=1'%20Or%201=1--	sqli-b01

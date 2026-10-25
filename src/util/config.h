@@ -61,6 +61,13 @@ struct EngineConfig {
     std::size_t max_text_bytes = 256 * 1024;   // 待检文本上限(第 17 讲)
     std::size_t max_hits = 512;         // 单次匹配最多报多少条(第 25 讲)
     int         reload_interval_seconds = 60;  // 特征库热加载检查间隔(第 14 讲)
+
+    // 归一化遍(项目 A):在原始匹配之外,再对"编码/注释还原后的规范形"
+    // 匹配一次,两遍取并集。关掉它就退回 228 条规则的字面匹配行为,
+    // 用于做消融实验(关 vs 开 的检出率差 = 这一层到底值多少)。
+    // 关掉不会比原来少检出,所以它是一个安全的回滚开关。
+    bool        extra_normalization = true;
+    int         normalize_decode_rounds = 3;   // 最多解几层编码
 };
 
 // 防护:限流与自动封禁(第 38、41 讲)
