@@ -55,13 +55,15 @@ else
 fi
 
 step "5b. WAF 绕过评测(门禁)"
-# 为什么有这一步:加规则/改归一化,很容易"补一个漏报、带出三个误报"。
+# 为什么有这一步:加规则/改归一化/调策略,很容易"补一个漏报、带出三个误报"。
 # 光看报告看不出来,必须让数字自己卡住。阈值见 scripts/eval-waf.sh 的注释。
 if ./build-ci/waf_eval --rules rules/attack_patterns.txt \
+        --policy rules/policy.conf \
         --corpus tools/waf_eval/corpus --repeat 3 \
         --max-miss 0.10 --max-fp 0.25 > /tmp/ci-eval.log 2>&1; then
-    ok "$(grep '变形样本有效' /tmp/ci-eval.log | sed 's/^[^:]*://')"
-    ok "$(grep '正常样本' /tmp/ci-eval.log | sed 's/^[^:]*://')"
+    ok "$(grep '变形样本' /tmp/ci-eval.log)"
+    ok "$(grep '正常样本' /tmp/ci-eval.log)"
+    ok "$(grep '策略' /tmp/ci-eval.log | head -1)"
 else
     bad "评测门禁未通过"
     grep -E '变形样本|正常样本|门禁' /tmp/ci-eval.log | head -6

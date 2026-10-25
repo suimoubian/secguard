@@ -25,7 +25,7 @@ struct ScanRecord {
     std::string  ip;
     std::string  uri;
     std::string  method;
-    std::string  action;            // PASS / BLOCK
+    std::string  action;            // PASS / ALERT / BLOCK(ALERT = 检出但策略放行)
     std::string  rule_hit;          // 命中的规则 ID,逗号分隔
     int          matched_len = 0;
     int          status_code = 0;

@@ -64,6 +64,9 @@ struct AppContext {
 
     std::atomic<std::int64_t> requests_total{0};
     std::atomic<std::int64_t> requests_blocked{0};
+    // 只命中 ALERT 级规则、放行但留痕的次数。和 blocked 分开统计:
+    // 两个数一起看才知道策略调得对不对(blocked 降、alerted 涨 = 正常)
+    std::atomic<std::int64_t> requests_alerted{0};
     std::atomic<std::int64_t> replay_rejected{0};
     std::chrono::steady_clock::time_point started_at{std::chrono::steady_clock::now()};
 

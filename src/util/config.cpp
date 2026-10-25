@@ -97,6 +97,7 @@ bool Config::load(Config& out, std::string& err) {
     // --- 引擎 ---
     out.engine.pattern_file = env_str("SECGUARD_PATTERN_FILE", "rules/attack_patterns.txt");
     out.engine.allowlist_file = env_str("SECGUARD_ALLOWLIST_FILE", out.engine.allowlist_file);
+    out.engine.policy_file = env_str("SECGUARD_POLICY_FILE", out.engine.policy_file);
     if (!env_size("SECGUARD_MAX_PATTERN_LEN", out.engine.max_pattern_len)) { err = "SECGUARD_MAX_PATTERN_LEN 不是整数"; return false; }
     if (!env_size("SECGUARD_MAX_TEXT", out.engine.max_text_bytes)) { err = "SECGUARD_MAX_TEXT 不是整数"; return false; }
     if (!env_size("SECGUARD_MAX_HITS", out.engine.max_hits)) { err = "SECGUARD_MAX_HITS 不是整数"; return false; }

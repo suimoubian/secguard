@@ -40,10 +40,12 @@ void register_audit_routes(httplib::Server& svr, AppContext& ctx) {
         nlohmann::json j;
         j["audit_total"] = st.total;
         j["audit_blocked"] = st.blocked;
+        j["audit_alerted"] = st.alerted;
         j["audit_passed"] = st.passed;
         j["distinct_ips"] = st.hits_by_ip;
         j["requests_total"] = ctx.requests_total.load();
         j["requests_blocked"] = ctx.requests_blocked.load();
+        j["requests_alerted"] = ctx.requests_alerted.load();
         j["replay_rejected"] = ctx.replay_rejected.load();
         j["db_pool_total"] = ctx.pool->total_count();
         j["db_pool_idle"] = ctx.pool->idle_count();

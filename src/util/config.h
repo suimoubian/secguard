@@ -57,6 +57,8 @@ struct EngineConfig {
     std::string pattern_file;           // 特征库路径
     // 白名单:某个路径下放行某些规则。缺失不算错误。
     std::string allowlist_file = "rules/allowlist.conf";
+    // 处置策略:规则 ID -> BLOCK/ALERT。缺失 = 全部 BLOCK(行为与加策略层之前一致)。
+    std::string policy_file = "rules/policy.conf";
     std::size_t max_pattern_len = 4096; // 超长模式拒收(第 13 讲)
     std::size_t max_text_bytes = 256 * 1024;   // 待检文本上限(第 17 讲)
     std::size_t max_hits = 512;         // 单次匹配最多报多少条(第 25 讲)

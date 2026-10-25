@@ -37,6 +37,7 @@ cmake --build "$BUILD_DIR" -j"$(nproc)" --target waf_eval >/dev/null
 mkdir -p "$OUT_DIR"
 
 ARGS=(--rules rules/attack_patterns.txt
+      --policy rules/policy.conf
       --corpus tools/waf_eval/corpus
       --out "$OUT_DIR/最新.md"
       --miss "$OUT_DIR/最新漏报.md"
@@ -44,8 +45,11 @@ ARGS=(--rules rules/attack_patterns.txt
 
 if [ "$GATE" = "1" ]; then
     # 阈值是这样定的:留出"正常增删规则"的余量,但拦住"明显变差"。
-    # 漏报率 10%、误报率 25% 是当前水平的红线;要调整就明确改这里,
+    # 漏报率 10%、误拦截率 25% 是当前水平的红线;要调整就明确改这里,
     # 并说明为什么 —— 改阈值比改检测逻辑容易,所以必须写下来。
+    #
+    # 注意门禁看的是**误拦截率**(真的返回 403),不是"命中率"。
+    # 否则把规则全降级成 ALERT 就能让门禁变绿 —— 那是假绿。
     ARGS+=(--max-miss 0.10 --max-fp 0.25)
 fi
 

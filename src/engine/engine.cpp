@@ -64,6 +64,16 @@ bool Engine::build_from_rules(std::vector<Rule> rules, const EngineConfig& cfg,
     snap->nopt.max_decode_rounds = cfg.normalize_decode_rounds;
     snap->rules = std::move(rules);
 
+    // 处置动作在建表时展开成数组:匹配热路径上只做一次下标访问,
+    // 不必每条命中都去查哈希表。策略改动会触发重建表,所以不会过期。
+    snap->actions.assign(snap->rules.size(), default_action_);
+    std::size_t alert_cnt = 0;
+    for (std::size_t i = 0; i < snap->rules.size(); ++i) {
+        const auto it = policy_.find(snap->rules[i].id);
+        if (it != policy_.end()) snap->actions[i] = it->second;
+        if (snap->actions[i] == RuleAction::kAlert) ++alert_cnt;
+    }
+
     // 建表前预估节点数,预留避免扩容搬迁(第 22 讲)
     std::size_t total_len = 0;
     for (const auto& r : snap->rules) total_len += r.text.size();
@@ -98,7 +108,8 @@ bool Engine::build_from_rules(std::vector<Rule> rules, const EngineConfig& cfg,
     info << "建表完成:规则 " << snap->rules.size()
          << " 条,节点 " << snap->ac.node_count()
          << " 个,白名单 " << snap->allowlist.size()
-         << " 条,归一化 " << (snap->extra_normalization
+         << " 条,处置 BLOCK " << (snap->rules.size() - alert_cnt) << " / ALERT " << alert_cnt
+         << ",归一化 " << (snap->extra_normalization
                                ? ("开(最多解 " + std::to_string(snap->nopt.max_decode_rounds) + " 层)")
                                : std::string("关"))
          << ",占用约 " << (snap->ac.memory_bytes() / 1024) << " KB";
@@ -146,6 +157,13 @@ bool Engine::load_from_file(const std::string& path, const EngineConfig& cfg,
         return false;
     }
     if (skipped > 0) LOG_WARN(kTag, "特征库有 ", skipped, " 行格式不对,已跳过");
+
+    // 策略要在建表之前载入:建表时会把动作展开成与规则一一对应的数组。
+    // 载入失败不算错误 —— 缺失等于"全部 BLOCK",行为退回加策略层之前。
+    {
+        std::string perr;
+        if (!load_policy(cfg.policy_file, perr)) LOG_WARN(kTag, "策略未载入: ", perr);
+    }
 
     if (!build_from_rules(std::move(rules), cfg, err)) return false;
 
@@ -245,6 +263,93 @@ std::size_t Engine::allowlist_size() const {
     return snap ? snap->allowlist.size() : 0;
 }
 
+// ---------------------------------------------------------------------------
+// 处置策略:规则 ID -> BLOCK / ALERT
+//
+// 格式(每行两个字段,空格或 TAB 都行):
+//   default BLOCK        # 全库默认动作(不写也是 BLOCK,即 fail-closed)
+//   SQL-003 ALERT        # 按规则 ID 覆盖
+//
+// 为什么单独一个文件而不是写进规则行:
+//   规则库是"检测能力",策略是"运维决定"。混在一起,想调一次阈值就得碰
+//   检测库,手一滑就改坏了特征。分开之后,同一套规则可以在不同环境配不同
+//   策略(演示环境全拦、生产环境只报警),而且策略改动可以单独热加载。
+//
+// 文件缺失时按"全部 BLOCK"处理 —— 也就是行为退回加策略层之前,
+// 这是一个安全的默认值:配置丢了只会更严,不会更松。
+// ---------------------------------------------------------------------------
+bool Engine::load_policy(const std::string& path, std::string& err) {
+    std::ifstream in(path);
+    if (!in) {
+        policy_.clear();
+        default_action_ = RuleAction::kBlock;
+        policy_path_ = path;
+        policy_mtime_ = -1;
+        err = "打不开策略文件(可忽略,按全部 BLOCK 处理): " + path;
+        return false;
+    }
+
+    std::unordered_map<std::string, RuleAction> table;
+    RuleAction def = RuleAction::kBlock;
+    std::string line;
+    int lineno = 0;
+    int bad = 0;
+    while (std::getline(in, line)) {
+        ++lineno;
+        const std::string t = trim(line);
+        if (t.empty() || t[0] == '#') continue;
+
+        std::istringstream iss(t);
+        std::string key, act_str, extra;
+        iss >> key >> act_str;
+        if (key.empty() || act_str.empty() || (iss >> extra)) { ++bad; continue; }
+
+        const std::string act = normalize(act_str);
+        RuleAction a;
+        if (act == "block")      a = RuleAction::kBlock;
+        else if (act == "alert") a = RuleAction::kAlert;
+        else { ++bad; continue; }
+
+        if (normalize(key) == "default") def = a;
+        else table[key] = a;      // 规则 ID 保持原样(大小写敏感)
+    }
+
+    if (bad > 0) LOG_WARN(kTag, "策略文件有 ", bad, " 行格式不对,已跳过");
+
+    policy_ = std::move(table);
+    default_action_ = def;
+    policy_path_ = path;
+    policy_mtime_ = file_mtime(path);
+
+    std::size_t alerts = 0;
+    for (const auto& kv : policy_) {
+        if (kv.second == RuleAction::kAlert) ++alerts;
+    }
+    LOG_INFO(kTag, "载入处置策略 ", path, ": 覆盖 ", policy_.size(),
+             " 条(其中 ALERT ", alerts, " 条),默认 ",
+             def == RuleAction::kBlock ? "BLOCK" : "ALERT");
+    return true;
+}
+
+RuleAction Engine::rule_action(std::int32_t idx) const {
+    const auto snap = current();
+    // 越界/无表时返回 BLOCK:失败方向必须更严,不能更松
+    if (!snap || idx < 0 || static_cast<std::size_t>(idx) >= snap->actions.size()) {
+        return RuleAction::kBlock;
+    }
+    return snap->actions[static_cast<std::size_t>(idx)];
+}
+
+std::size_t Engine::alert_rule_count() const {
+    const auto snap = current();
+    if (!snap) return 0;
+    std::size_t n = 0;
+    for (const auto a : snap->actions) {
+        if (a == RuleAction::kAlert) ++n;
+    }
+    return n;
+}
+
 void Engine::scan_into(std::string_view text, const Snapshot& snap,
                        std::vector<std::int32_t>& hits, std::size_t& max_len,
                        std::size_t& bytes, bool& truncated) const {
@@ -337,7 +442,13 @@ bool Engine::reload_if_changed(const std::string& path, const EngineConfig& cfg,
     const bool allow_changed = (am >= 0 &&
         (cfg.allowlist_file != allowlist_path_ || am != allowlist_mtime_));
 
-    if (!pattern_changed && !allow_changed) return false;
+    // 策略文件也要看。理由和白名单一样:只盯特征库的 mtime,
+    // 运维改了策略却看不到效果。
+    const long long pm2 = file_mtime(cfg.policy_file);
+    const bool policy_changed = (pm2 >= 0 &&
+        (cfg.policy_file != policy_path_ || pm2 != policy_mtime_));
+
+    if (!pattern_changed && !allow_changed && !policy_changed) return false;
 
     std::string err;
 
@@ -346,6 +457,27 @@ bool Engine::reload_if_changed(const std::string& path, const EngineConfig& cfg,
         if (!load_from_file(path, cfg, err)) {
             LOG_ERROR(kTag, "热加载失败,继续用旧表:", err);
             return false;   // 加载失败就保留旧表,不能把服务搞哑
+        }
+        new_rule_count = rule_count();
+        return true;
+    }
+
+    // 只改了策略:动作存在 Snapshot 里,所以必须重建一次表才能生效。
+    // 自动机本身不用重建,但为了"换表"语义统一(旧表由最后一个引用者释放),
+    // 这里走同一个 build_from_rules,代价是重建一棵 234 条规则的树,几十毫秒。
+    if (policy_changed) {
+        LOG_INFO(kTag, "检测到策略变化,重新载入:", cfg.policy_file);
+        std::string perr;
+        if (!load_policy(cfg.policy_file, perr)) {
+            LOG_ERROR(kTag, "策略载入失败,继续用旧策略:", perr);
+            return false;
+        }
+        const auto snap = current();
+        if (!snap) return false;
+        std::vector<Rule> rules_copy = snap->rules;
+        if (!build_from_rules(std::move(rules_copy), cfg, err)) {
+            LOG_ERROR(kTag, "策略热加载后重建失败:", err);
+            return false;
         }
         new_rule_count = rule_count();
         return true;

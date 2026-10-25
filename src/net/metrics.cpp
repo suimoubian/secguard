@@ -45,6 +45,9 @@ std::string render_metrics(AppContext& ctx) {
             ctx.requests_total.load());
     counter(o, "secguard_requests_blocked_total", "被拦截的请求总数",
             ctx.requests_blocked.load());
+    counter(o, "secguard_requests_alerted_total",
+            "只命中 ALERT 级规则、放行但留痕的请求数",
+            ctx.requests_alerted.load());
     counter(o, "secguard_replay_rejected_total", "重放请求被拒的次数",
             ctx.replay_rejected.load());
 

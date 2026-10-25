@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -183,6 +184,53 @@ int main() {
         const std::string benign = "PATH:/static/js/app.js\nQUERY:page=2\n";
         check(he.search(benign).rule_indices.empty(), "加固:正常请求不误报");
         check(!he.search(benign).canonical_pass,      "加固:正常请求走快路");
+    }
+
+    std::printf("\n=== 3c. 处置策略(BLOCK / ALERT) ===\n");
+    {
+        const std::vector<Rule> rules = {
+            {"union select", "T-B1", "SQL_INJECTION", "HIGH"},
+            {"select",       "T-A1", "SQL_INJECTION", "HIGH"},
+        };
+        EngineConfig c;
+        c.pattern_file = "";
+        c.allowlist_file = "";
+        c.policy_file = "";           // 空 = 没有策略文件
+        Engine e;
+        std::string err;
+        check(e.build_from_rules(rules, c, err), "无策略建表");
+        // fail-closed:策略文件丢了只会更严,不会更松
+        check(e.rule_action(0) == RuleAction::kBlock &&
+              e.rule_action(1) == RuleAction::kBlock, "缺策略 -> 全部 BLOCK");
+        check(e.alert_rule_count() == 0, "ALERT 计数 0");
+
+        const std::string path = "/tmp/secguard-policy-test.conf";
+        {
+            // 注意:策略文件里写的是**规则 ID**(T-A1),不是特征文本(select)。
+            // 写错成文本的话会变成"一条永远匹配不上的覆盖项",而且不会报错 ——
+            // 这个坑就是本测试第一次跑出来的。
+            std::ofstream f(path);
+            f << "default BLOCK\nT-A1 ALERT\n";
+        }
+        check(e.load_policy(path, err), "载入策略文件");
+        check(e.build_from_rules(rules, c, err), "按策略重建表");
+        check(e.rule_action(1) == RuleAction::kAlert, "按 ID 降级:select -> ALERT");
+        check(e.rule_action(0) == RuleAction::kBlock, "未列出的 union select 仍 BLOCK");
+        check(e.alert_rule_count() == 1, "ALERT 计数 1");
+
+        // 降级只改"怎么处置",不改"能不能检出"
+        const auto mr = e.search("PATH:/p\nQUERY:q=select\n");
+        check(!mr.rule_indices.empty(), "ALERT 级规则仍然被检出");
+
+        // 规则删了但策略里还留着 -> 只打日志,不影响启动
+        {
+            std::ofstream f(path);
+            f << "NO-SUCH-RULE ALERT\n";
+        }
+        check(e.load_policy(path, err), "未知规则 ID 不报错");
+        check(e.build_from_rules(rules, c, err) && e.alert_rule_count() == 0,
+              "未知规则 ID 被忽略");
+        std::remove(path.c_str());
     }
 
     std::printf("\n=== 4. HTTP -> 待检文本 ===\n");

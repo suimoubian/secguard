@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "aho_corasick.h"
@@ -25,6 +26,21 @@ struct Rule {
     std::string  id;            // 规则 ID,落 audit_log.rule_hit
     std::string  category;      // SQL_INJECTION / XSS / CMD_INJECTION / PATH_TRAVERSAL
     std::string  severity;      // LOW / MEDIUM / HIGH / CRITICAL
+};
+
+// 规则命中之后的处置动作。
+//
+// 为什么要把"检出"和"处置"分成两层:
+//   规则库回答"这条流量像不像攻击",策略回答"像到什么程度才值得拦"。
+//   混在一起写,想降误报就只能删规则 —— 删了这条线索也就没了。
+//   分开之后,过宽的规则可以降成 ALERT:仍然记录、仍然能查、仍然参与
+//   AI 分析,只是不返回 403。这是可以量化取舍的,不是拍脑袋。
+//
+// 实测依据:评测语料里 9 条误报有 8 条来自 SQL-003(select)、SQL-058(0x)、
+// PAT-034(/home/) 这类"单字面量"规则,把它们降级比删掉安全得多。
+enum class RuleAction : std::uint8_t {
+    kBlock,   // 拦下(403)
+    kAlert,   // 放行 + 记一条 action=ALERT 的审计
 };
 
 // 一次匹配的结果
@@ -74,6 +90,21 @@ public:
     // 载入白名单(独立文件,缺失时视为空名单)
     bool load_allowlist(const std::string& path, std::string& err);
 
+    // 载入处置策略(独立文件,缺失时视为"全部 BLOCK")。
+    //
+    // 格式:
+    //   default BLOCK|ALERT        全库默认动作
+    //   SQL-003 ALERT              按规则 ID 覆盖
+    // 以 # 开头的行是注释。未知规则 ID 只会打日志,不影响启动 ——
+    // 规则删了但策略里还留着,不该让服务起不来。
+    bool load_policy(const std::string& path, std::string& err);
+
+    // 这条规则的处置动作(按下标)
+    [[nodiscard]] RuleAction rule_action(std::int32_t idx) const;
+
+    // 被降级成 ALERT 的规则条数(启动日志和 /health 里能看到)
+    [[nodiscard]] std::size_t alert_rule_count() const;
+
     // 这个路径下,这条规则是否被放行
     [[nodiscard]] bool is_allowlisted(std::string_view path,
                                       const std::string& rule_id) const;
@@ -103,6 +134,7 @@ private:
     struct Snapshot {
         AhoCorasick ac;
         std::vector<Rule> rules;
+        std::vector<RuleAction> actions;   // 与 rules 一一对应的处置动作
         std::size_t max_hits = 512;
         std::vector<AllowEntry> allowlist;
         bool             extra_normalization = true;   // 是否跑第 2 遍
@@ -125,6 +157,13 @@ private:
     std::vector<AllowEntry> allowlist_;   // 白名单单独存,重建表时带上
     std::string allowlist_path_;
     long long allowlist_mtime_ = 0;
+
+    // 处置策略:规则 ID -> 动作。建表时展开成 Snapshot::actions,
+    // 这样匹配热路径上不用再查哈希表。
+    std::unordered_map<std::string, RuleAction> policy_;
+    RuleAction  default_action_ = RuleAction::kBlock;
+    std::string policy_path_;
+    long long   policy_mtime_ = -1;
 };
 
 }  // namespace secguard

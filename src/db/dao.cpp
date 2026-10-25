@@ -355,11 +355,13 @@ AuditStats Dao::audit_stats() {
         std::unique_ptr<sql::ResultSet> rs(st->executeQuery(
             "SELECT COUNT(*) AS total, "
             "SUM(action = 'BLOCK') AS blocked, "
+            "SUM(action = 'ALERT') AS alerted, "
             "SUM(action = 'PASS')  AS passed, "
             "COUNT(DISTINCT ip)    AS ips FROM audit_log"));
         if (rs->next()) {
             s.total   = col_i64(rs.get(), "total");
             s.blocked = col_i64(rs.get(), "blocked");
+            s.alerted = col_i64(rs.get(), "alerted");
             s.passed  = col_i64(rs.get(), "passed");
             s.hits_by_ip = col_i64(rs.get(), "ips");
         }

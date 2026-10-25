@@ -11,8 +11,6 @@
 namespace secguard {
 namespace {
 constexpr const char* kTag = "[服务] ";
-
-const char* action_of(bool blocked) { return blocked ? "BLOCK" : "PASS"; }
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -219,6 +217,15 @@ bool run_guard(AppContext& ctx, const httplib::Request& req,
         LOG_INFO(kTag, "白名单放行 path=", req.path, " 规则=", allowlisted_ids);
     }
 
+    // 命中之后怎么处置,取决于策略(规则库只说"像不像",策略说"拦不拦")。
+    // 判定规则:命中里只要有一条 BLOCK 级,就拦;全是 ALERT 级则放行但留痕。
+    // 这个"取最严"的口径很重要 —— 不能因为有一条宽规则被降级,
+    // 就让同一个请求里更严重的命中也被放过。
+    bool any_block = false;
+    for (const std::int32_t idx : effective_hits) {
+        if (ctx.engine->rule_action(idx) == RuleAction::kBlock) { any_block = true; break; }
+    }
+
     if (!effective_hits.empty()) {
         // 命中的规则 ID 拼起来(最多列 8 条,避免超长)
         std::string ids;
@@ -230,7 +237,9 @@ bool run_guard(AppContext& ctx, const httplib::Request& req,
         if (effective_hits.size() > limit) ids += ",...";
         rec.rule_hit = ids;
         if (mr.truncated) rec.rule_hit += "(截断)";
+    }
 
+    if (any_block) {
         // 记一次命中,达到阈值就自动封禁(计数也在 Redis,多实例一致)
         ctx.guard->record_hit(rec.ip, ctx.cfg.guard.hit_threshold,
                               ctx.cfg.guard.window_seconds,
@@ -253,11 +262,23 @@ bool run_guard(AppContext& ctx, const httplib::Request& req,
         return false;
     }
 
-    // 没命中:放行。审计记录在处理完之后由处理器补齐状态码
-    rec.action = "PASS";
+    if (!effective_hits.empty()) {
+        // 只有 ALERT 级命中:放行,但留一条可查的审计。
+        //
+        // 关键取舍:**不计入封禁计数**。否则一篇提到 select 的技术博客
+        // 会把作者自己封掉 —— 那正是这些宽规则被降级的原因。
+        // 代价是"只触发 ALERT 的攻击"不会累积封禁,所以只把宽规则降级,
+        // 精确规则必须留在 BLOCK 级。
+        rec.action = "ALERT";
+        ctx.requests_alerted.fetch_add(1);
+        LOG_INFO(kTag, "告警级命中(不拦截) path=", req.path, " 规则=", rec.rule_hit);
+    } else {
+        // 没命中:放行。审计记录在处理完之后由处理器补齐状态码
+        rec.action = "PASS";
+    }
+
     const auto t1 = std::chrono::steady_clock::now();
     rec.cost_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-    (void)action_of;
     return true;
 }
 
@@ -295,6 +316,12 @@ bool scan_body(AppContext& ctx, const httplib::Request& req,
     }
     if (effective.empty()) return true;
 
+    // 请求体这一路也要看策略:全是被降级的宽规则命中时,不该拦。
+    bool any_block = false;
+    for (const std::int32_t idx : effective) {
+        if (ctx.engine->rule_action(idx) == RuleAction::kBlock) { any_block = true; break; }
+    }
+
     std::string ids;
     const std::size_t limit = std::min<std::size_t>(effective.size(), 8);
     for (std::size_t i = 0; i < limit; ++i) {
@@ -309,6 +336,16 @@ bool scan_body(AppContext& ctx, const httplib::Request& req,
     rec.matched_len = static_cast<int>(std::max<std::size_t>(
         static_cast<std::size_t>(rec.matched_len), mr.max_matched_len));
     rec.scan_bytes += mr.scanned_bytes;
+
+    if (!any_block) {
+        // 只有 ALERT 级:不拦、不计封禁,但要把审计级别抬到 ALERT。
+        // 注意"抬"这个方向:如果前置钩子已经判了 PASS,这里改成 ALERT;
+        // 如果已经是 BLOCK(不可能走到这),不动。
+        if (rec.action != "BLOCK") rec.action = "ALERT";
+        ctx.requests_alerted.fetch_add(1);
+        LOG_INFO(kTag, "请求体告警级命中(不拦截) path=", req.path, " 规则=", ids);
+        return true;
+    }
 
     ctx.guard->record_hit(rec.ip, ctx.cfg.guard.hit_threshold,
                           ctx.cfg.guard.window_seconds,

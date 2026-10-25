@@ -63,8 +63,10 @@ struct Sample {
 };
 
 struct Verdict {
-    bool        hit = false;
-    std::string first_rule;   // 命中的第一条规则 ID(报告里用来归因)
+    bool        hit = false;        // 任一规则命中(检出)
+    bool        blocked = false;    // 命中了 BLOCK 级规则(真的会返回 403)
+    std::string first_rule;         // 命中的第一条规则 ID(检出归因)
+    std::string first_block_rule;   // 第一条 BLOCK 级规则 ID(拦截归因)
 };
 
 struct Count {
@@ -201,9 +203,18 @@ RunResult run_engine(Engine& engine, const std::vector<Sample>& samples, int per
             const MatchResult mr = engine.search(text);
             if (rep == 0) {
                 r.verdicts[i].hit = !mr.rule_indices.empty();
-                if (!mr.rule_indices.empty()) {
-                    r.verdicts[i].first_rule =
-                        engine.rule(mr.rule_indices.front()).id;
+                for (const std::int32_t idx : mr.rule_indices) {
+                    if (r.verdicts[i].first_rule.empty()) {
+                        r.verdicts[i].first_rule = engine.rule(idx).id;
+                    }
+                    // 只有 BLOCK 级命中才算"真的会拦"。被策略降成 ALERT 的
+                    // 规则仍然算检出,但不产生 403 —— 这两件事必须分开量。
+                    if (engine.rule_action(idx) == RuleAction::kBlock) {
+                        r.verdicts[i].blocked = true;
+                        if (r.verdicts[i].first_block_rule.empty()) {
+                            r.verdicts[i].first_block_rule = engine.rule(idx).id;
+                        }
+                    }
                 }
                 if (mr.canonical_pass) ++r.canonical_pass_count;
             }
@@ -235,6 +246,34 @@ struct Group {
     Count hit_baseline;     // 基线样本里被检出的
     Count variant_meaningful;  // 变形样本里"基线命中"的(有效分母)
     Count variant_hit;      // 其中加固后仍检出
+    Count block_meaningful; // 变形样本里"基线会被拦"的(拦截维度的分母)
+    Count block_hit;        // 其中加固后仍会被拦
+};
+
+// 一次评测的全部统计。检出(命中)和拦截(403)是两个维度:
+//   - 检出率掉了 = 这条线索没了
+//   - 拦截率掉了但检出没掉 = 规则被降级成 ALERT,看得见但不挡
+// 规则分级的效果只能靠这两个数分开看,合成一个就全糊了。
+struct Stats {
+    Count base_hit;         // 基线样本:检出
+    Count base_block;       // 基线样本:拦截
+    Count benign_hit;       // 正常样本:误报(会写 ALERT)
+    Count benign_block;     // 正常样本:误拦截(会返回 403,用户能感知)
+    int variant_meaningful = 0;
+    int variant_missed = 0;
+    int block_meaningful = 0;
+    int block_missed = 0;
+    std::map<std::string, Group> by_cat;
+    std::map<std::string, Group> by_tech;
+
+    [[nodiscard]] double miss_rate() const {
+        return variant_meaningful > 0
+            ? static_cast<double>(variant_missed) / variant_meaningful : 0.0;
+    }
+    [[nodiscard]] double unblocked_rate() const {
+        return block_meaningful > 0
+            ? static_cast<double>(block_missed) / block_meaningful : 0.0;
+    }
 };
 
 }  // namespace
@@ -242,6 +281,7 @@ struct Group {
 int main(int argc, char** argv) {
     std::string rules_path = "rules/attack_patterns.txt";
     std::string corpus_dir = "tools/waf_eval/corpus";
+    std::string policy_path = "rules/policy.conf";
     std::string out_md;
     std::string out_miss;
     int perf_repeat = 20;
@@ -260,6 +300,7 @@ int main(int argc, char** argv) {
         };
         if (a == "--rules")       rules_path = next("--rules");
         else if (a == "--corpus") corpus_dir = next("--corpus");
+        else if (a == "--policy") policy_path = next("--policy");
         else if (a == "--out")    out_md = next("--out");
         else if (a == "--miss")   out_miss = next("--miss");
         else if (a == "--repeat") perf_repeat = std::stoi(next("--repeat"));
@@ -268,8 +309,9 @@ int main(int argc, char** argv) {
         else if (a == "--max-fp")   max_fp = std::stod(next("--max-fp"));
         else {
             std::fprintf(stderr,
-                "用法: %s [--rules 规则文件] [--corpus 语料目录] [--out 报告.md]\n"
-                "        [--miss 漏报清单.md] [--repeat N] [--dump-rules]\n", argv[0]);
+                "用法: %s [--rules 规则文件] [--policy 策略文件] [--corpus 语料目录]\n"
+                "        [--out 报告.md] [--miss 漏报清单.md] [--repeat N] [--dump-rules]\n",
+                argv[0]);
             return 2;
         }
     }
@@ -280,6 +322,7 @@ int main(int argc, char** argv) {
     if (dump_rules) {
         EngineConfig rc;
         rc.pattern_file = rules_path;
+        rc.policy_file = policy_path;
         rc.allowlist_file = "";
         Engine e;
         std::string e2;
@@ -289,8 +332,10 @@ int main(int argc, char** argv) {
         }
         for (std::size_t i = 0; i < e.rule_count(); ++i) {
             const Rule& r = e.rule(static_cast<std::int32_t>(i));
-            std::printf("%s\t%s\t%s\t%s\n", r.id.c_str(), r.text.c_str(),
-                        r.category.c_str(), r.severity.c_str());
+            std::printf("%s\t%s\t%s\t%s\t%s\n", r.id.c_str(), r.text.c_str(),
+                        r.category.c_str(), r.severity.c_str(),
+                        e.rule_action(static_cast<std::int32_t>(i)) == RuleAction::kAlert
+                            ? "ALERT" : "BLOCK");
         }
         return 0;
     }
@@ -304,6 +349,7 @@ int main(int argc, char** argv) {
 
     EngineConfig cfg;
     cfg.pattern_file = rules_path;
+    cfg.policy_file = policy_path;
     cfg.allowlist_file = "";        // 评测口径:不应用任何白名单
     cfg.max_text_bytes = 256 * 1024;
     cfg.max_hits = 512;
@@ -335,67 +381,74 @@ int main(int argc, char** argv) {
     for (std::size_t i = 0; i < samples.size(); ++i) by_id[samples[i].id] = i;
 
     auto compute = [&](const RunResult& run) {
-        std::map<std::string, Group> by_cat;    // 按类别
-        std::map<std::string, Group> by_tech;   // 按手法(只看变形)
-        Count base_set, benign_set, variant_all;
-        int variant_meaningful = 0, variant_missed = 0;
-
+        Stats st;
         for (std::size_t i = 0; i < samples.size(); ++i) {
             const Sample& s = samples[i];
             const bool hit = run.verdicts[i].hit;
+            const bool blk = run.verdicts[i].blocked;
 
-            if (s.benign()) { benign_set.total++; if (hit) benign_set.hit++; continue; }
+            if (s.benign()) {
+                st.benign_hit.total++;   if (hit) st.benign_hit.hit++;
+                st.benign_block.total++; if (blk) st.benign_block.hit++;
+                continue;
+            }
 
             if (s.base.empty()) {
-                base_set.total++;
-                if (hit) base_set.hit++;
-                by_cat[s.category].all.total++;
-                if (hit) by_cat[s.category].all.hit++;
-                by_cat[s.category].hit_baseline.total++;
-                if (hit) by_cat[s.category].hit_baseline.hit++;
+                st.base_hit.total++;   if (hit) st.base_hit.hit++;
+                st.base_block.total++; if (blk) st.base_block.hit++;
+                auto& g = st.by_cat[s.category];
+                g.all.total++;            if (hit) g.all.hit++;
+                g.hit_baseline.total++;   if (hit) g.hit_baseline.hit++;
             } else {
-                variant_all.total++;
-                by_tech[s.technique].all.total++;
-                by_cat[s.category].all.total++;
-                if (hit) { by_cat[s.category].all.hit++; by_tech[s.technique].all.hit++; }
+                auto& g = st.by_cat[s.category];
+                auto& t = st.by_tech[s.technique];
+                g.all.total++; if (hit) g.all.hit++;
+                t.all.total++; if (hit) t.all.hit++;
 
                 const auto it = by_id.find(s.base);
-                bool base_hit = false;
-                if (it != by_id.end()) base_hit = run.verdicts[it->second].hit;
+                const bool base_hit = (it != by_id.end()) && run.verdicts[it->second].hit;
+                const bool base_blk = (it != by_id.end()) && run.verdicts[it->second].blocked;
+
                 if (base_hit) {
-                    ++variant_meaningful;
-                    by_tech[s.technique].variant_meaningful.total++;
-                    by_cat[s.category].variant_meaningful.total++;
-                    if (hit) {
-                        by_tech[s.technique].variant_meaningful.hit++;
-                        by_cat[s.category].variant_meaningful.hit++;
-                    } else {
-                        ++variant_missed;
-                    }
+                    ++st.variant_meaningful;
+                    g.variant_meaningful.total++;
+                    t.variant_meaningful.total++;
+                    if (hit) { g.variant_meaningful.hit++; t.variant_meaningful.hit++; }
+                    else ++st.variant_missed;
+                }
+                if (base_blk) {
+                    ++st.block_meaningful;
+                    g.block_meaningful.total++;
+                    t.block_meaningful.total++;
+                    if (blk) { g.block_meaningful.hit++; t.block_meaningful.hit++; }
+                    else ++st.block_missed;
                 }
             }
         }
-        return std::make_tuple(base_set, benign_set, variant_all,
-                               variant_meaningful, variant_missed, by_cat, by_tech);
+        return st;
     };
 
-    const auto [base_base, base_benign, base_var_all, base_var_meaningful,
-                base_var_missed, base_by_cat, base_by_tech] = compute(base_run);
-    const auto [hard_base, hard_benign, hard_var_all, hard_var_meaningful,
-                hard_var_missed, hard_by_cat, hard_by_tech] = compute(hard_run);
-    (void)base_var_all; (void)hard_var_all;
+    const Stats base_stats = compute(base_run);
+    const Stats hard_stats = compute(hard_run);
 
     // --- 汇总到 stdout(报告细节写进 markdown) ---
-    std::printf("基线样本 %d 条:基线检出 %s,加固检出 %s\n",
-                base_base.total, pct(base_base.rate()).c_str(), pct(hard_base.rate()).c_str());
-    std::printf("变形样本有效 %d 条:基线漏报 %d 条(%s),加固漏报 %d 条(%s)\n",
-                base_var_meaningful, base_var_missed,
-                pct(base_var_meaningful ? double(base_var_missed) / base_var_meaningful : 0).c_str(),
-                hard_var_missed,
-                pct(hard_var_meaningful ? double(hard_var_missed) / hard_var_meaningful : 0).c_str());
-    std::printf("正常样本 %d 条:基线误报 %d(%s),加固误报 %d(%s)\n",
-                base_benign.total, base_benign.hit, pct(base_benign.rate()).c_str(),
-                hard_benign.hit, pct(hard_benign.rate()).c_str());
+    std::printf("策略 %s(ALERT 级规则 %zu 条)\n",
+                policy_path.c_str(), hard_engine.alert_rule_count());
+    std::printf("基线样本 %d 条:检出 %s -> %s,拦截 %s -> %s\n",
+                base_stats.base_hit.total,
+                pct(base_stats.base_hit.rate()).c_str(), pct(hard_stats.base_hit.rate()).c_str(),
+                pct(base_stats.base_block.rate()).c_str(), pct(hard_stats.base_block.rate()).c_str());
+    std::printf("变形样本:漏报 %d(%s) -> %d(%s),未拦截 %d(%s) -> %d(%s)\n",
+                base_stats.variant_missed, pct(base_stats.miss_rate()).c_str(),
+                hard_stats.variant_missed, pct(hard_stats.miss_rate()).c_str(),
+                base_stats.block_missed, pct(base_stats.unblocked_rate()).c_str(),
+                hard_stats.block_missed, pct(hard_stats.unblocked_rate()).c_str());
+    std::printf("正常样本 %d 条:误报 %d(%s) -> %d(%s),误拦截 %d(%s) -> %d(%s)\n",
+                base_stats.benign_hit.total,
+                base_stats.benign_hit.hit, pct(base_stats.benign_hit.rate()).c_str(),
+                hard_stats.benign_hit.hit, pct(hard_stats.benign_hit.rate()).c_str(),
+                base_stats.benign_block.hit, pct(base_stats.benign_block.rate()).c_str(),
+                hard_stats.benign_block.hit, pct(hard_stats.benign_block.rate()).c_str());
     std::printf("每样本耗时:基线 %.1f us,加固 %.1f us\n",
                 base_run.us_per_sample, hard_run.us_per_sample);
 
@@ -424,8 +477,29 @@ int main(int argc, char** argv) {
         f << "# 变形样本漏报清单\n";
         const int n_base = dump_misses(base_run, "一、基线(只做字面匹配)下的漏报");
         const int n_hard = dump_misses(hard_run, "二、加固(加归一化层)后仍漏报");
+
+        // 三、被策略降级的不再拦截的样本 —— 这是规则分级的**代价清单**,
+        // 必须单独列出来,否则"误报降了"就成了片面的说法。
+        f << "\n## 三、被策略降级为 ALERT、不再拦截的变形样本\n\n";
+        f << "这些样本仍然被检出(审计里有记录),但不会返回 403。\n\n";
+        f << "| 样本 | 类别 | 手法 | 载荷 | 命中的 BLOCK 级规则已降级 |\n|---|---|---|---|---|\n";
+        int n_alert = 0;
+        for (std::size_t i = 0; i < samples.size(); ++i) {
+            const Sample& s = samples[i];
+            if (s.benign() || s.base.empty()) continue;
+            if (!hard_run.verdicts[i].hit || hard_run.verdicts[i].blocked) continue;
+            const auto it = by_id.find(s.base);
+            if (it == by_id.end() || !base_run.verdicts[it->second].blocked) continue;
+            std::string p = s.payload;
+            for (char& c : p) if (c == '|') c = '\\';
+            f << "| `" << s.id << "` | " << s.category << " | " << s.technique
+              << " | `" << p << "` | `" << hard_run.verdicts[i].first_rule << "` |\n";
+            ++n_alert;
+        }
+        if (n_alert == 0) f << "\n(没有)\n";
         f.close();
-        std::printf("漏报清单:基线 %d 条,加固 %d 条 -> %s\n", n_base, n_hard, out_miss.c_str());
+        std::printf("漏报清单:基线 %d 条,加固 %d 条,降级未拦截 %d 条 -> %s\n",
+                    n_base, n_hard, n_alert, out_miss.c_str());
     }
 
     // --- Markdown 报告 ---
@@ -439,51 +513,71 @@ int main(int argc, char** argv) {
              " 加固 = 字面 + 归一化双遍。\n\n";
 
         f << "## 一、总览\n\n";
+        f << "策略文件:`" << policy_path << "`(ALERT 级规则 "
+          << hard_engine.alert_rule_count() << " 条)。\n\n";
         f << "| 指标 | 基线 | 加固 | 变化 |\n|---|---|---|---|\n";
-        f << "| 基线样本检出率(" << base_base.total << " 条) | "
-          << pct(base_base.rate()) << " | " << pct(hard_base.rate()) << " | "
-          << pct_delta(hard_base.rate(), base_base.rate()) << " |\n";
-        const double bm = base_var_meaningful ? double(base_var_missed) / base_var_meaningful : 0.0;
-        const double hm = hard_var_meaningful ? double(hard_var_missed) / hard_var_meaningful : 0.0;
-        f << "| 变形样本漏报率(" << base_var_meaningful << " 条) | "
-          << pct(bm) << " | " << pct(hm) << " | " << pct_delta(hm, bm) << " |\n";
-        f << "| 正常样本误报率(" << base_benign.total << " 条) | "
-          << pct(base_benign.rate()) << " | " << pct(hard_benign.rate()) << " | "
-          << pct_delta(hard_benign.rate(), base_benign.rate()) << " |\n";
+        f << "| 基线样本检出率(" << base_stats.base_hit.total << " 条) | "
+          << pct(base_stats.base_hit.rate()) << " | " << pct(hard_stats.base_hit.rate()) << " | "
+          << pct_delta(hard_stats.base_hit.rate(), base_stats.base_hit.rate()) << " |\n";
+        f << "| **变形样本漏报率**(检出维度) | "
+          << pct(base_stats.miss_rate()) << " | " << pct(hard_stats.miss_rate()) << " | "
+          << pct_delta(hard_stats.miss_rate(), base_stats.miss_rate()) << " |\n";
+        f << "| **变形样本未拦截率**(拦截维度) | "
+          << pct(base_stats.unblocked_rate()) << " | " << pct(hard_stats.unblocked_rate()) << " | "
+          << pct_delta(hard_stats.unblocked_rate(), base_stats.unblocked_rate()) << " |\n";
+        f << "| 正常样本误报率(会写 ALERT) | "
+          << pct(base_stats.benign_hit.rate()) << " | " << pct(hard_stats.benign_hit.rate()) << " | "
+          << pct_delta(hard_stats.benign_hit.rate(), base_stats.benign_hit.rate()) << " |\n";
+        f << "| **正常样本误拦截率**(会返回 403) | "
+          << pct(base_stats.benign_block.rate()) << " | " << pct(hard_stats.benign_block.rate())
+          << " | " << pct_delta(hard_stats.benign_block.rate(), base_stats.benign_block.rate())
+          << " |\n";
         f << "| 每样本耗时 | " << base_run.us_per_sample << " us | "
           << hard_run.us_per_sample << " us | "
           << pct_delta(hard_run.us_per_sample, base_run.us_per_sample) << " |\n";
-        f << "\n有效变形样本指的是「它的来源基线样本确实被检出」的那些——";
-        f << "只有这种样本被漏掉,才叫绕过。\n";
+        f << "\n两个维度必须分开看:**漏报** = 一条线索都没留下;"
+             "**未拦截** = 看见了但只记 ALERT、没返回 403。\n";
+        f << "规则分级(把宽规则降成 ALERT)会让后者变差、前者不变,"
+             "同时把误拦截率压下去 —— 这就是它的全部意义。\n";
+        f << "\n> 注意:本表两列(基线/加固)用的是**同一套策略**,所以"
+             "「误拦截」那一行看的是归一化的影响,不是策略的影响。\n";
+        f << "> 策略本身的效果(5 条宽规则降成 ALERT:误拦截 18.8% → 4.2%)"
+             "见 [WAF绕过评测.md](../WAF绕过评测.md) 第十节。\n";
 
         // 按类别
         f << "\n## 二、按攻击类别\n\n";
-        f << "| 类别 | 基线样本 | 基线检出 | 有效变形 | 基线漏报 | 加固漏报 |\n";
-        f << "|---|---|---|---|---|---|\n";
-        for (const auto& [cat, g] : base_by_cat) {
-            const auto hit2 = hard_by_cat.find(cat);
-            const int hard_miss = hit2 == hard_by_cat.end()
-                ? 0 : hit2->second.variant_meaningful.total - hit2->second.variant_meaningful.hit;
+        f << "| 类别 | 基线样本 | 基线检出 | 有效变形 | 基线漏报 | 加固漏报 | 基线未拦截 | 加固未拦截 |\n";
+        f << "|---|---|---|---|---|---|---|---|\n";
+        for (const auto& [cat, g] : base_stats.by_cat) {
+            const auto hit2 = hard_stats.by_cat.find(cat);
+            const Group empty{};
+            const Group& h = (hit2 == hard_stats.by_cat.end()) ? empty : hit2->second;
             const int base_miss = g.variant_meaningful.total - g.variant_meaningful.hit;
+            const int hard_miss = h.variant_meaningful.total - h.variant_meaningful.hit;
+            const int base_unblk = g.block_meaningful.total - g.block_meaningful.hit;
+            const int hard_unblk = h.block_meaningful.total - h.block_meaningful.hit;
             f << "| " << cat << " | " << g.hit_baseline.total
               << " | " << g.hit_baseline.hit
               << " | " << g.variant_meaningful.total
               << " | " << base_miss
-              << " | " << hard_miss << " |\n";
+              << " | " << hard_miss
+              << " | " << base_unblk
+              << " | " << hard_unblk << " |\n";
         }
 
         // 按手法
         f << "\n## 三、按绕过手法\n\n";
         f << "| 手法 | 有效变形 | 基线漏报 | 加固漏报 |\n|---|---|---|---|\n";
-        std::vector<std::pair<std::string, Group>> techs(base_by_tech.begin(), base_by_tech.end());
+        std::vector<std::pair<std::string, Group>> techs(base_stats.by_tech.begin(),
+                                                        base_stats.by_tech.end());
         std::sort(techs.begin(), techs.end(), [](const auto& a, const auto& b) {
             const int ma = a.second.variant_meaningful.total - a.second.variant_meaningful.hit;
             const int mb = b.second.variant_meaningful.total - b.second.variant_meaningful.hit;
             return ma > mb;
         });
         for (const auto& [tech, g] : techs) {
-            const auto hit2 = hard_by_tech.find(tech);
-            const int hard_miss = hit2 == hard_by_tech.end()
+            const auto hit2 = hard_stats.by_tech.find(tech);
+            const int hard_miss = (hit2 == hard_stats.by_tech.end())
                 ? 0 : hit2->second.variant_meaningful.total - hit2->second.variant_meaningful.hit;
             const int base_miss = g.variant_meaningful.total - g.variant_meaningful.hit;
             f << "| " << tech << " | " << g.variant_meaningful.total
@@ -492,11 +586,12 @@ int main(int argc, char** argv) {
 
         // 误报变化
         f << "\n## 四、误报变化\n\n";
-        if (hard_benign.hit <= base_benign.hit) {
-            f << "加固后误报没有增加(" << base_benign.hit << " -> "
-              << hard_benign.hit << ")。\n";
+        if (hard_stats.benign_hit.hit <= base_stats.benign_hit.hit) {
+            f << "加固后误报没有增加(" << base_stats.benign_hit.hit << " -> "
+              << hard_stats.benign_hit.hit << ")。\n";
         } else {
-            f << "加固后新增误报 " << (hard_benign.hit - base_benign.hit) << " 条:\n\n";
+            f << "加固后新增误报 " << (hard_stats.benign_hit.hit - base_stats.benign_hit.hit)
+              << " 条:\n\n";
             for (std::size_t i = 0; i < samples.size(); ++i) {
                 if (!samples[i].benign()) continue;
                 if (base_run.verdicts[i].hit || !hard_run.verdicts[i].hit) continue;
@@ -507,8 +602,8 @@ int main(int argc, char** argv) {
         }
 
         // 误报明细:哪条规则在正常流量上开火 —— 这是"规则分级"的依据
-        f << "\n### 误报明细(加固模式下正常样本被判黑的每一条)\n\n";
-        f << "| 样本 | 手法 | 载荷 | 命中规则 |\n|---|---|---|---|\n";
+        f << "\n### 误报明细(加固模式下被判为可疑的每一条)\n\n";
+        f << "| 样本 | 手法 | 载荷 | 命中规则 | 实际动作 |\n|---|---|---|---|---|\n";
         std::map<std::string, int> rule_fp_count;
         for (std::size_t i = 0; i < samples.size(); ++i) {
             if (!samples[i].benign() || !hard_run.verdicts[i].hit) continue;
@@ -516,7 +611,9 @@ int main(int argc, char** argv) {
             for (char& c : p) if (c == '|') c = '\\';
             if (p.size() > 60) p = p.substr(0, 57) + "...";
             f << "| `" << samples[i].id << "` | " << samples[i].technique
-              << " | `" << p << "` | " << hard_run.verdicts[i].first_rule << " |\n";
+              << " | `" << p << "` | " << hard_run.verdicts[i].first_rule
+              << " | " << (hard_run.verdicts[i].blocked ? "BLOCK(403)" : "ALERT(放行)")
+              << " |\n";
             rule_fp_count[hard_run.verdicts[i].first_rule]++;
         }
         if (!rule_fp_count.empty()) {
@@ -542,18 +639,18 @@ int main(int argc, char** argv) {
     }
 
     // --- 门禁:指标越界就返回非 0,让 CI 卡住"补一个漏报带出三个误报"的改动 ---
+    // 门禁看的是**拦截维度**:漏报率(完全没看见)和误拦截率(用户真的被 403)。
+    // 只看检出率的话,把规则全降级成 ALERT 也能过门禁 —— 那是假绿。
     int rc = 0;
-    const double miss_rate = hard_var_meaningful > 0
-        ? static_cast<double>(hard_var_missed) / hard_var_meaningful : 0.0;
-    const double fp_rate = hard_benign.total > 0
-        ? static_cast<double>(hard_benign.hit) / hard_benign.total : 0.0;
+    const double miss_rate = hard_stats.miss_rate();
+    const double fp_rate = hard_stats.benign_block.rate();
     if (max_miss >= 0 && miss_rate > max_miss) {
         std::fprintf(stderr, "门禁失败:变形漏报率 %s 超过上限 %s\n",
                      pct(miss_rate).c_str(), pct(max_miss).c_str());
         rc = 1;
     }
     if (max_fp >= 0 && fp_rate > max_fp) {
-        std::fprintf(stderr, "门禁失败:正常样本误报率 %s 超过上限 %s\n",
+        std::fprintf(stderr, "门禁失败:正常样本误拦截率 %s 超过上限 %s\n",
                      pct(fp_rate).c_str(), pct(max_fp).c_str());
         rc = 1;
     }

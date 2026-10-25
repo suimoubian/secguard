@@ -86,6 +86,7 @@ struct AlertStats {
 struct AuditStats {
     std::int64_t total = 0;
     std::int64_t blocked = 0;
+    std::int64_t alerted = 0;   // 命中但被策略降级为"只告警"的条数
     std::int64_t passed = 0;
     std::int64_t hits_by_ip = 0;
 };
