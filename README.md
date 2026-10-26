@@ -250,9 +250,10 @@ cmake --build build -j$(nproc)
 |---|---|
 | `scripts/verify.sh` | 一键自检:攻击检测、body 检测、鉴权、审计、AI、热加载、限流封禁 |
 | `scripts/ci-local.sh` | 本地模拟 CI:干净编译、零警告、对拍、单测、基准、DAO |
+| `scripts/offline-restore.sh` | 从本地缓存恢复 Docker 镜像,完全不联网(镜像被 prune 后救急) |
 | `scripts/webhook_receiver.py` | 本地告警接收端,用来确认 webhook 真的推出来了 |
 | `bench/run.sh` | 压测(自动绑核,输出对比表) |
-| `docker/deploy.sh` | 服务器上一键部署(轮询健康检查) |
+| `docker/deploy.sh` | 服务器上一键部署(带内存守卫、轮询健康检查) |
 
 ### 管理接口要令牌
 

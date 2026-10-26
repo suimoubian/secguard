@@ -77,11 +77,54 @@ cmd_stop() {
     ok "已停止(数据卷保留,重启不丢数据)"
 }
 
+# ---------------------------------------------------------------------------
+# 构建守卫:内存不够就别在这里编
+#
+# 为什么要有这道检查:这个项目的编译单元里塞了 httplib 和 nlohmann/json,
+# 单个 cc1plus 峰值能到 1.5GB 以上。2G 内存的机器硬编会陷入 swap 抖动 ——
+# 进程 87% CPU、每秒换入换出几百页、日志停在某个百分比十几分钟不动。
+# 看起来像"卡死了",其实是在慢慢磨。如果不拦,人只会以为项目有问题。
+#
+# 实测:2 核 2G 的机器编到 28%(http_server.cpp)就再也没动过。
+# ---------------------------------------------------------------------------
+check_build_memory() {
+    # 镜像已经在本地就不用编,直接启动
+    if docker image inspect secguard-app:latest > /dev/null 2>&1; then
+        return 0
+    fi
+
+    local mem_mb
+    mem_mb=$(free -m | awk '/^Mem:/ {print $2}')
+    if [ "${mem_mb:-0}" -lt 3000 ]; then
+        die "本机内存 ${mem_mb}MB,不足以编译这个项目(单个编译单元峰值约 1.6GB)。
+硬编会陷入 swap 抖动,表现是卡在某个百分比十几分钟不动。
+
+两个选择:
+
+  ① 在别的机器上构建,把镜像传过来(推荐,CI/CD 的标准做法):
+       docker compose build app
+       docker save secguard-app:latest | gzip -1 > sg-image.tar.gz
+       scp sg-image.tar.gz <user>@<host>:~/
+       # 到本机:
+       gunzip -c ~/sg-image.tar.gz | docker load
+       ./docker/deploy.sh
+
+  ② 换台内存 ≥4GB 的机器,或者本机升级配置
+
+注意:镜像一旦被 docker system prune 删掉,这里会重新触发构建。"
+    fi
+}
+
 cmd_deploy() {
     check_prereq
 
-    say "==> 构建镜像"
-    docker compose build
+    if docker image inspect secguard-app:latest > /dev/null 2>&1; then
+        say "==> 镜像已存在,跳过构建(要强制重建: docker compose build --no-cache)"
+    else
+        check_build_memory
+        say "==> 构建镜像"
+        docker compose build
+    fi
 
     say "==> 启动"
     docker compose up -d
