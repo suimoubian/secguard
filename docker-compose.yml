@@ -87,6 +87,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # 并行编译作业数。默认 2,内存小的机器(2G)在 .env 里设
+        # SECGUARD_BUILD_JOBS=1,否则单个 g++ 峰值 1GB 会把内存打爆,
+        # 表现为构建阶段被 OOM 杀掉、只报一句 Killed。
+        BUILD_JOBS: ${SECGUARD_BUILD_JOBS:-2}
     container_name: secguard-app
     restart: unless-stopped
     depends_on:
