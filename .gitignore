@@ -21,6 +21,9 @@ cmake-build-*/
 compile_commands.json
 # Office 打开文档时生成的锁文件(~$xxx.docx),不是内容
 ~$*
+# Python 字节码(scripts/ 里有 .py 工具)
+__pycache__/
+*.pyc
 
 # ---- 本机密文:绝不提交 ----
 # 数据库口令、LLM API Key 一律走环境变量或本地配置文件
