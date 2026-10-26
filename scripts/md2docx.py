@@ -79,10 +79,15 @@ def add_bottom_border(p, color="1F4E79", sz="6"):
 
 INLINE_BOLD = re.compile(r"\*\*(.+?)\*\*")
 INLINE_CODE = re.compile(r"`(.+?)`")
+INLINE_LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 
 
 def add_rich_text(p, text, size=10.5, color=DARK, base_bold=False):
-    """处理 **粗体** 和 `代码`"""
+    """处理 **粗体**、`代码`、[文字](链接)"""
+    # 链接只保留文字:文档里链接的 label 通常就是文件名本身,
+    # 打印出来带一长串 URL 反而更难看。
+    text = INLINE_LINK.sub(r"\1", text)
+
     tokens = []
     pos = 0
     pattern = re.compile(r"\*\*(.+?)\*\*|`(.+?)`")
@@ -413,12 +418,20 @@ def parse(md_text):
                 blocks.append(("table", cleaned))
             continue
 
-        if s.startswith("> "):
+        if s.startswith(">"):
             q = []
-            while i < n and lines[i].startswith("> "):
-                q.append(lines[i][2:].strip())
+            while i < n and lines[i].startswith(">"):
+                # 裸 ">" 是引用块内的空行,不能当成块结束 ——
+                # 否则一段引用会被切成好几个框,中间还漏出一个 ">" 字符。
+                content = lines[i][1:]
+                if content.startswith(" "):
+                    content = content[1:]
+                content = content.rstrip()
+                if content:
+                    q.append(content)
                 i += 1
-            blocks.append(("quote", q))
+            if q:
+                blocks.append(("quote", q))
             continue
 
         if re.match(r"^- ", s):
