@@ -284,6 +284,7 @@ int main(int argc, char** argv) {
     std::string policy_path = "rules/policy.conf";
     std::string out_md;
     std::string out_miss;
+    std::string out_verdicts;
     int perf_repeat = 20;
     bool dump_rules = false;
     double max_miss = -1.0;   // <0 = 不设门禁
@@ -307,6 +308,7 @@ int main(int argc, char** argv) {
         else if (a == "--dump-rules") dump_rules = true;
         else if (a == "--max-miss") max_miss = std::stod(next("--max-miss"));
         else if (a == "--max-fp")   max_fp = std::stod(next("--max-fp"));
+        else if (a == "--verdicts") out_verdicts = next("--verdicts");
         else {
             std::fprintf(stderr,
                 "用法: %s [--rules 规则文件] [--policy 策略文件] [--corpus 语料目录]\n"
@@ -500,6 +502,21 @@ int main(int argc, char** argv) {
         f.close();
         std::printf("漏报清单:基线 %d 条,加固 %d 条,降级未拦截 %d 条 -> %s\n",
                     n_base, n_hard, n_alert, out_miss.c_str());
+    }
+
+    // --- 逐条判定:给外部横向对比用 ---
+    // 把引擎对每条样本的结论导出来,别的引擎(比如 OWASP CRS)可以用同一套
+    // 语料跑一遍,再按 id 对齐。这样"谁检出了谁"是可核对的,不是各说各话。
+    if (!out_verdicts.empty()) {
+        std::ofstream f(out_verdicts);
+        if (!f) { std::fprintf(stderr, "写不了 %s\n", out_verdicts.c_str()); return 1; }
+        f << "id\thit\tblocked\n";
+        for (std::size_t i = 0; i < samples.size(); ++i) {
+            f << samples[i].id << '\t'
+              << (hard_run.verdicts[i].hit ? 1 : 0) << '\t'
+              << (hard_run.verdicts[i].blocked ? 1 : 0) << '\n';
+        }
+        std::printf("逐条判定 -> %s\n", out_verdicts.c_str());
     }
 
     // --- Markdown 报告 ---
