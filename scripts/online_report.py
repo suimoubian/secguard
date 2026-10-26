@@ -164,6 +164,38 @@ def pct(a, b):
     return f"{a * 100.0 / b:.1f}%" if b else "—"
 
 
+def section_provenance(total, public, self_traffic):
+    """数据来源构成:这批数据里有多少是"自己打自己"。
+
+    为什么必须先说这件事:部署时的 verify.sh(52 项,含并发压限流那一组)、
+    demo 脚本、开发时的探测请求,全都会写进同一张 audit_log,而且看起来
+    和真实攻击一模一样。不分开的话,报告会得出"我们每天被攻击 N 次"这种
+    自己骗自己的结论 —— 拿去面试会被一眼看穿。
+    """
+    lines = ["## 零、数据来源构成(先看这一节)", ""]
+    if total == 0:
+        return "\n".join(lines + ["(无数据)", ""])
+
+    lines += [md_table(["来源", "请求数", "占比", "说明"],
+                       [["公网(真实外部流量)", f"{public:,}", pct(public, total),
+                         "可能是扫描器,也可能是正常访客"],
+                        ["内网 / 自测", f"{self_traffic:,}", pct(self_traffic, total),
+                         "verify.sh / demo / 本机探测(127.0.0.1、docker 网桥)"]]), ""]
+
+    share = public / total if total else 0.0
+    if share < 0.2:
+        lines += ["> ⚠️ **公网流量只占 %.0f%%,这份报告目前基本是「自己打自己」。**" % (share * 100),
+                  ">",
+                  "> 原因通常是:服务刚上线、新 IP 还没被 Shodan/Fofa 收录、端口不常见。",
+                  "> **在公网占比过半之前,不要拿它当「真实攻击观测」对外讲。**",
+                  "> 判断方法:等 3~7 天;或直接看下面「扫描器在找什么」有没有内容 ——",
+                  "> 有 404 探测才说明外面有人摸到你了。", ""]
+    elif share < 0.5:
+        lines += ["> 公网占比 %.0f%%:真实流量已经混进来了,但自测流量仍然占大头,"
+                  "引用数字时要说清楚口径。" % (share * 100), ""]
+    return "\n".join(lines)
+
+
 # 自家业务路由,不参与"扫描器指纹"判定 —— 否则 /api/login 会被标成"后台入口探测",
 # 而它本来就是正常入口。判断一个路径"可疑"的前提是:它不该被访问。
 OWN_ROUTE_RE = re.compile(r"^/(api/|health$|metrics$|$)")
@@ -430,6 +462,13 @@ def main():
         f"MIN(created_at), MAX(created_at) FROM audit_log WHERE {where} "
         f"GROUP BY ip ORDER BY COUNT(*) DESC LIMIT 200", cfg)
 
+    # 全量来源(只取 IP 和次数),用来算"公网 vs 自测"的占比。
+    # 不直接用 SQL 的 LIKE 判断内网段:172.16/12 和 100.64/10 的边界用字符串
+    # 匹配容易错,交给 ipaddress 模块更稳。
+    ip_all = mysql(
+        f"SELECT ip, COUNT(*) FROM audit_log WHERE {where} "
+        f"GROUP BY ip ORDER BY COUNT(*) DESC LIMIT 5000", cfg)
+
     subnet_rows = mysql(
         f"SELECT SUBSTRING_INDEX(ip,'.',3) s, COUNT(*), COUNT(DISTINCT ip) "
         f"FROM audit_log WHERE {where} "
@@ -484,12 +523,18 @@ def main():
         f"    AND rule_hit NOT LIKE 'REPLAY%') "
         f"FROM audit_log WHERE {where} AND action='BLOCK'", cfg)
 
+    total_requests = int(meta[0] or 0)
+    public_requests = sum(int(n) for ip, n in ip_all if not is_internal(ip))
+    self_requests = max(0, total_requests - public_requests)
+
     parts = [
         "# SecGuard 线上观测报告", "",
         f"> 生成时间:{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  ",
         f"> 观察窗口:最近 {days} 天  ",
         f"> 数据来源:`audit_log`(容器 `{CONTAINER}`)",
         "",
+        "---", "",
+        section_provenance(total_requests, public_requests, self_requests),
         "---", "",
         section_overview(days, meta, actions, cfg),
         "---", "",
