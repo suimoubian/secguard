@@ -69,7 +69,8 @@ send() {  # $1=说明  $2=路径
 echo "=== 发送演示攻击(共 8 次)==="
 send "SQL 注入:union select"        "/?q=union%20select%201,2,3"
 send "SQL 注入:or 1=1"              "/?q=1%27%20or%201=1--"
-send "SQL 注入:子查询"              "/?q=1%20and%20(select%20count(*)%20from%20user)"
+send "子查询(命中 SQL-003,该规则是 ALERT 级 -> 预期 200)" \
+                                    "/?q=1%20and%20(select%20count(*)%20from%20user)"
 send "XSS:script 标签"              "/?q=%3Cscript%3Ealert(1)%3C/script%3E"
 send "XSS:onerror 事件"             "/?q=%3Cimg%20src=x%20onerror=alert(1)%3E"
 send "路径穿越:/etc/passwd"         "/?file=../../../../etc/passwd"
@@ -89,7 +90,9 @@ sleep 2
 
 echo
 echo "=== 结果 ==="
-echo "  9 个请求都被拦下了。接下来:"
+echo "  8 个请求被拦(403)。第 3 个返回 200 是**正常的**,不是漏洞:"
+echo "  它命中 SQL-003,而这条规则在 rules/policy.conf 里被降级成 ALERT ——"
+echo "  仍然记录、仍然进 AI 分析,只是不返回 403。原因见 docs/演示素材.md。"
 echo
 echo "  1) 看审计流水(管理接口,需要管理员令牌):"
 echo "       TOKEN=\$(curl -s -X POST $BASE/api/login \\"
