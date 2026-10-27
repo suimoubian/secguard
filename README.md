@@ -274,6 +274,7 @@ cmake --build build -j$(nproc)
 | `scripts/ci-local.sh` | 本地模拟 CI:干净编译、零警告、对拍、单测、基准、DAO |
 | `scripts/offline-restore.sh` | 从本地缓存恢复 Docker 镜像,完全不联网(镜像被 prune 后救急) |
 | `scripts/demo-attack.sh` | 一键演示:9 类攻击,输出带预期结果 |
+| `scripts/backup-db.sh` | 数据库备份 / 列备份 / 校验 / **恢复测试**(真恢复到一个临时库比对行数) |
 | `scripts/watch-real-traffic.sh` | 看有没有真实攻击打进来(按 IP 汇总并排除自己人) |
 | `scripts/webhook_receiver.py` | 本地告警接收端,用来确认 webhook 真的推出来了 |
 | `bench/run.sh` | 压测(自动绑核,输出对比表) |

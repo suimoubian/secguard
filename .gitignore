@@ -37,3 +37,6 @@ secrets.*
 core
 core.*
 vgcore.*
+
+# 数据库备份:里面有全库数据(含口令哈希),绝不能进仓库
+backups/
