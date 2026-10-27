@@ -7,6 +7,7 @@
 
 #include "crypto/auth_crypto.h"
 #include "util/log.h"
+#include "util/utf8.h"
 
 namespace secguard {
 namespace {
@@ -101,7 +102,13 @@ bool run_guard(AppContext& ctx, const httplib::Request& req,
                 const auto t1 = std::chrono::steady_clock::now();
                 rec.cost_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
             }
-            record_audit(ctx, rec);
+            // 降采样:被封的 IP 继续刷时不要每条都写审计。
+            // 实测一个被封的扫描器刷了 28,451 条,占全库 79%,全是废记录。
+            // 被压掉的条数进 suppressed 计数器,/metrics 里能看到,不是悄悄丢。
+            if (!ctx.ban_sampler ||
+                ctx.ban_sampler->should_record(rec.ip, ctx.cfg.guard.ban_audit_interval_sec)) {
+                record_audit(ctx, rec);
+            }
             return false;
 
         case GuardDecision::kRateLimited:
@@ -269,8 +276,10 @@ bool run_guard(AppContext& ctx, const httplib::Request& req,
         // 会把作者自己封掉 —— 那正是这些宽规则被降级的原因。
         // 代价是"只触发 ALERT 的攻击"不会累积封禁,所以只把宽规则降级,
         // 精确规则必须留在 BLOCK 级。
+        // 注意:这里**不**加 requests_alerted。计数放在 record_audit 里,
+        // 按最终动作算 —— 一个请求可能先命中查询串的 ALERT、再在请求体里
+        // 命中 BLOCK,在钩子里加会把同一个请求同时算进两个指标。
         rec.action = "ALERT";
-        ctx.requests_alerted.fetch_add(1);
         LOG_INFO(kTag, "告警级命中(不拦截) path=", req.path, " 规则=", rec.rule_hit);
     } else {
         // 没命中:放行。审计记录在处理完之后由处理器补齐状态码
@@ -341,8 +350,8 @@ bool scan_body(AppContext& ctx, const httplib::Request& req,
         // 只有 ALERT 级:不拦、不计封禁,但要把审计级别抬到 ALERT。
         // 注意"抬"这个方向:如果前置钩子已经判了 PASS,这里改成 ALERT;
         // 如果已经是 BLOCK(不可能走到这),不动。
+        // 计数同样留给 record_audit,按最终动作算一次。
         if (rec.action != "BLOCK") rec.action = "ALERT";
-        ctx.requests_alerted.fetch_add(1);
         LOG_INFO(kTag, "请求体告警级命中(不拦截) path=", req.path, " 规则=", ids);
         return true;
     }
@@ -368,12 +377,18 @@ bool scan_body(AppContext& ctx, const httplib::Request& req,
 }
 
 void record_audit(AppContext& ctx, const ScanRecord& rec) {
+    // ALERT 计数放在这里,而不是检出钩子里:一个请求可能在查询串里命中 ALERT,
+    // 随后在请求体里命中 BLOCK。只有**最终动作**才算数,否则同一个请求会
+    // 同时计入 alerted 和 blocked —— 指标就成了"两个都涨"的糊涂账。
+    // record_audit 每个请求恰好调用一次(拦截在钩子里调,放行由处理器调)。
+    if (rec.action == "ALERT") ctx.requests_alerted.fetch_add(1);
+
     if (!ctx.dao) return;
     AuditLogRow row;
     row.trace_id      = rec.trace_id;
     row.ip            = rec.ip;
     if (rec.user_id > 0) row.user_id = rec.user_id;
-    row.uri           = rec.uri.substr(0, 500);
+    row.uri           = utf8::truncate(rec.uri, 500);
     row.method        = rec.method.substr(0, 15);
     row.params_digest = rec.params_digest.substr(0, 1000);
     row.rule_hit      = rec.rule_hit.substr(0, 120);
@@ -461,6 +476,11 @@ static void register_core_routes(httplib::Server& svr, AppContext& ctx) {
         j["nodes"] = ctx.engine ? ctx.engine->node_count() : 0;
         j["engine_mem_kb"] = ctx.engine ? ctx.engine->memory_bytes() / 1024 : 0;
         j["engine_generation"] = ctx.engine ? ctx.engine->generation() : 0;
+        // 把两个"排查时最先要问"的开关暴露出来:
+        //   归一化关了没有、有几条规则被降成 ALERT。
+        // 没有这两项,verify.sh 和线上排查都只能靠 SSH 上去翻环境变量。
+        j["engine_normalize"] = ctx.cfg.engine.extra_normalization;
+        j["engine_alert_rules"] = ctx.engine ? ctx.engine->alert_rule_count() : 0;
         j["db"] = db_ok;
         j["db_pool_total"] = ctx.pool ? ctx.pool->total_count() : 0;
         j["db_pool_idle"] = ctx.pool ? ctx.pool->idle_count() : 0;

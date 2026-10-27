@@ -70,8 +70,6 @@ PATH_SIGNATURES = [
     (r"\.well-known|robots\.txt|sitemap", "站点结构探测(低危)"),
 ]
 
-SEV_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
-
 # 这些不是特征库里的规则,而是防护层自己写进 rule_hit 的"合成命中"。
 # 必须和内容规则分开统计:混在一起,"检测能力"会被限流/封禁淹没 ——
 # 限流挡下的请求只说明对方打太快,不说明我们认出了攻击。

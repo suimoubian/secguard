@@ -143,6 +143,7 @@ int main() {
     }
 
     LoginThrottle login_throttle;
+    BanAuditSampler ban_sampler;   // 封禁请求的审计降采样(见 app_context.h 注释)
 
     // ---- 7. AI 分析层(第 59~63 讲) ----
     LlmClient llm(cfg.llm);
@@ -163,6 +164,7 @@ int main() {
     ctx.guard = &guard;
     ctx.audit = audit.get();
     ctx.login_throttle = &login_throttle;
+    ctx.ban_sampler = &ban_sampler;
     ctx.llm = &llm;
     ctx.analyzer = &analyzer;
 

@@ -5,6 +5,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "util/utf8.h"
+
 namespace secguard {
 namespace {
 
@@ -195,7 +197,7 @@ bool parse_verdict(const std::string& content, Verdict& out, std::string& err) {
 
     // reasoning:截断,别往库里塞长篇大论
     if (j.contains("reasoning") && j["reasoning"].is_string()) {
-        out.reasoning = j["reasoning"].get<std::string>().substr(0, 1000);
+        out.reasoning = utf8::truncate(j["reasoning"].get<std::string>(), 1000);
     } else {
         out.reasoning = "(模型未给出理由)";
     }

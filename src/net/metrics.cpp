@@ -50,6 +50,13 @@ std::string render_metrics(AppContext& ctx) {
             ctx.requests_alerted.load());
     counter(o, "secguard_replay_rejected_total", "重放请求被拒的次数",
             ctx.replay_rejected.load());
+    // 被封禁期间被压掉的审计条数。这个数不为 0 是正常的(说明采样在生效),
+    // 但它突然暴涨说明有 IP 在被封后持续刷 —— 那本身是个信号。
+    if (ctx.ban_sampler) {
+        counter(o, "secguard_audit_suppressed_total",
+                "被封禁期间因降采样而未写入的审计条数",
+                ctx.ban_sampler->suppressed());
+    }
 
     // --- 引擎 ---
     if (ctx.engine) {

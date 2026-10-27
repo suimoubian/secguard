@@ -10,6 +10,7 @@
 #include <nlohmann/json.hpp>
 
 #include "util/log.h"
+#include "util/utf8.h"
 
 namespace secguard {
 namespace {
@@ -183,7 +184,7 @@ LlmResult LlmClient::call_once(const std::string& system_prompt,
     }
     if (http_status != 200) {
         // 错误响应体可能含服务端信息,截断后再记
-        std::string snippet = ctx.body.substr(0, 200);
+        std::string snippet = utf8::truncate(ctx.body, 200);
         out.error = "HTTP " + std::to_string(http_status) + " " + snippet;
         return out;
     }

@@ -35,14 +35,31 @@ std::string trim(const std::string& s) {
 
 // 按 TAB 切分。用 TAB 而不是竖线:特征文本里本身会出现 | ` $ 这些字符,
 // 竖线做分隔符会产生歧义(踩过这个坑)。
-std::vector<std::string> split_fields(const std::string& s) {
-    std::vector<std::string> out;
+//
+// 返回的是**未修剪**的原始字段。为什么要保留原始值:
+// 规则文件里写过 `select `(带尾空格,本意是"select 后面跟空格"),加载时
+// 一律 trim 就变成了裸词匹配 —— 文件写的和实际跑的完全不是一回事,而且
+// 没有任何提示。15 条规则这样沉在库里,直到评测把误报拉出来才被发现。
+// 现在把原始值和修剪后的值都留着,由调用方决定是警告还是拒绝。
+struct RawFields {
+    std::vector<std::string> raw;      // 未修剪
+    std::vector<std::string> trimmed;  // 修剪后(实际入库的值)
+    bool text_had_space = false;       // 第一个字段修剪前后不一样
+};
+
+RawFields split_fields(const std::string& s) {
+    RawFields out;
     std::size_t start = 0;
     for (std::size_t i = 0; i <= s.size(); ++i) {
         if (i == s.size() || s[i] == '\t') {
-            out.push_back(trim(s.substr(start, i - start)));
+            const std::string raw = s.substr(start, i - start);
+            out.raw.push_back(raw);
+            out.trimmed.push_back(trim(raw));
             start = i + 1;
         }
+    }
+    if (!out.raw.empty() && out.raw.front() != out.trimmed.front()) {
+        out.text_had_space = true;
     }
     return out;
 }
@@ -135,20 +152,56 @@ bool Engine::load_from_file(const std::string& path, const EngineConfig& cfg,
     std::string line;
     int lineno = 0;
     int skipped = 0;
+    int space_trimmed = 0;      // 特征文本首尾带空白、被 trim 掉的条数
+    int commented_rules = 0;    // 形如 "#  规则ID  类别 ..." 的行:八成是想写规则却写成了注释
+    std::string trim_examples;
+    std::string commented_examples;
+
     while (std::getline(in, line)) {
         ++lineno;
-        const std::string t = trim(line);
-        if (t.empty() || t[0] == '#') continue;
+        std::string t = trim(line);
+        if (t.empty()) continue;
+
+        // 以 # 开头 = 注释。但有一种历史坑必须拦住:
+        // 规则文件里的 `#\tSQL-033\tSQL_INJECTION\tMEDIUM` 看起来是规则,
+        // 实际被当成注释整行丢弃 —— 这条规则从来没生效过,而且没有任何提示。
+        // 判据:去掉 # 之后还带 TAB 分隔的字段,就当成"疑似被注释掉的规则"报警。
+        if (t[0] == '#') {
+            const std::string tail = trim(t.substr(1));
+            if (tail.find('\t') != std::string::npos) {
+                ++commented_rules;
+                if (commented_examples.size() < 160) {
+                    commented_examples += (commented_examples.empty() ? "" : "; ");
+                    commented_examples += tail;
+                }
+            }
+            continue;
+        }
+
+        // 转义:行首 `\#` 表示特征文本本身以 # 开头(否则永远没法表达)
+        if (t.size() >= 2 && t[0] == '\\' && t[1] == '#') {
+            t = t.substr(1);
+        }
 
         const auto parts = split_fields(t);
-        if (parts.empty() || parts[0].empty()) { ++skipped; continue; }
+        if (parts.trimmed.empty() || parts.trimmed[0].empty()) { ++skipped; continue; }
+
+        if (parts.text_had_space) {
+            ++space_trimmed;
+            if (trim_examples.size() < 160) {
+                trim_examples += (trim_examples.empty() ? "" : "; ");
+                trim_examples += parts.trimmed[0];
+            }
+        }
 
         Rule r;
-        r.text = parts[0];
-        if (parts.size() >= 2 && !parts[1].empty()) r.id = parts[1];
+        r.text = parts.trimmed[0];
+        if (parts.trimmed.size() >= 2 && !parts.trimmed[1].empty()) r.id = parts.trimmed[1];
         else r.id = "R" + std::to_string(lineno);
-        r.category = (parts.size() >= 3 && !parts[2].empty()) ? parts[2] : "UNKNOWN";
-        r.severity = (parts.size() >= 4 && !parts[3].empty()) ? parts[3] : "MEDIUM";
+        r.category = (parts.trimmed.size() >= 3 && !parts.trimmed[2].empty())
+                   ? parts.trimmed[2] : "UNKNOWN";
+        r.severity = (parts.trimmed.size() >= 4 && !parts.trimmed[3].empty())
+                   ? parts.trimmed[3] : "MEDIUM";
         rules.push_back(std::move(r));
     }
 
@@ -157,6 +210,18 @@ bool Engine::load_from_file(const std::string& path, const EngineConfig& cfg,
         return false;
     }
     if (skipped > 0) LOG_WARN(kTag, "特征库有 ", skipped, " 行格式不对,已跳过");
+
+    // 这两类问题以前是"静默生效"的:文件写的和跑的完全不是一回事,
+    // 只能等评测把误报拉出来才发现。现在改成载入时就喊出来。
+    if (space_trimmed > 0) {
+        LOG_WARN(kTag, "有 ", space_trimmed, " 条特征的首尾空白被 trim 掉了"
+                 "(文件里的 `select ` 实际是 `select`),例如: ", trim_examples,
+                 "。如果本意是词边界,请改用归一化 + 策略,别靠空格表达");
+    }
+    if (commented_rules > 0) {
+        LOG_WARN(kTag, "有 ", commented_rules, " 行以 # 开头但带 TAB 分隔,像是被注释掉的规则,"
+                 "已按注释跳过: ", commented_examples);
+    }
 
     // 策略要在建表之前载入:建表时会把动作展开成与规则一一对应的数组。
     // 载入失败不算错误 —— 缺失等于"全部 BLOCK",行为退回加策略层之前。
@@ -207,7 +272,7 @@ bool Engine::load_allowlist(const std::string& path, std::string& err) {
         const std::string t = trim(line);
         if (t.empty() || t[0] == '#') continue;
 
-        const auto parts = split_fields(t);
+        const auto parts = split_fields(t).trimmed;
         if (parts.size() < 2 || parts[0].empty()) { ++bad; continue; }
 
         AllowEntry e;

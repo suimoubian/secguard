@@ -307,6 +307,7 @@ void register_audit_routes(httplib::Server& svr, AppContext& ctx) {
         j["transport_errors"] = after.transport_errors - before.transport_errors;
         j["parse_errors"] = after.parse_errors - before.parse_errors;
         j["alerts_created"] = after.alerts_created - before.alerts_created;
+        j["alerts_merged"] = after.alerts_merged - before.alerts_merged;
         j["skipped_low_confidence"] = after.skipped_low_confidence
                                     - before.skipped_low_confidence;
         j["skipped_not_attack"] = after.skipped_not_attack - before.skipped_not_attack;
@@ -347,6 +348,7 @@ void register_audit_routes(httplib::Server& svr, AppContext& ctx) {
             j["transport_errors"] = s.transport_errors;
             j["parse_errors"] = s.parse_errors;
             j["alerts_created"] = s.alerts_created;
+            j["alerts_merged"] = s.alerts_merged;
             j["skipped_low_confidence"] = s.skipped_low_confidence;
             j["skipped_not_attack"] = s.skipped_not_attack;
             j["rate_limited"] = s.rate_limited;

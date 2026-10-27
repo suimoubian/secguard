@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <map>
+#include <set>
 #include <unordered_map>
 
 #include "util/log.h"
+#include "util/utf8.h"
 
 namespace secguard {
 namespace {
@@ -14,6 +17,47 @@ constexpr const char* kTag = "[AI分析] ";
 std::int64_t now_ms() {
     using namespace std::chrono;
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+// ---------------------------------------------------------------------------
+// 威胁类型的规范化(只用于聚合分组,不改写告警里的原文)
+//
+// 为什么要这一步:实测同一个"敏感文件探测"行为,模型这轮说
+// SENSITIVE_FILE_PROBE,下轮说 SENSITIVE_FILE_PROBING,另一台 IP 又是
+// SENSITIVE_FILE_SCANNING。按字符串精确分组的话,这些全被当成不同类,
+// 聚合永远不触发 —— 第一次实现就踩了这个坑。
+//
+// 规则:按 '_' 分词后取前两段。
+//   SENSITIVE_FILE_PROBE / _PROBING / _SCANNING / _ACCESS -> SENSITIVE_FILE
+//   SQL_INJECTION                                        -> SQL_INJECTION
+//   XSS                                                  -> XSS
+//   MULTI_VECTOR_SCAN                                    -> MULTI_VECTOR
+// ---------------------------------------------------------------------------
+std::string canonical_threat(const std::string& t) {
+    std::string out;
+    int parts = 0;
+    std::string cur;
+    for (char c : t) {
+        if (c == '_') {
+            if (!cur.empty()) {
+                if (parts) out.push_back('_');
+                out += cur;
+                ++parts;
+                cur.clear();
+                if (parts >= 2) return out;
+            }
+        } else {
+            cur.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+        }
+    }
+    if (!cur.empty()) {
+        if (parts) {
+            if (parts < 2) { out.push_back('_'); out += cur; }
+        } else {
+            out += cur;
+        }
+    }
+    return out.empty() ? t : out;
 }
 
 }  // namespace
@@ -102,6 +146,22 @@ bool Analyzer::do_round(int batch, bool manual) {
     std::vector<std::int64_t> analyzed_ids;
     bool any_transport_error = false;
 
+    // -----------------------------------------------------------------------
+    // 先攒着,不立刻写库。
+    //
+    // 为什么要攒:实测一天下来 204 条告警里 191 条(93.6%)是
+    // SENSITIVE_FILE_PROBE,来自 200 个不同 IP、每个只打十几下 ——
+    // 典型的分布式凭据扫描。逐条写的结果是真正的 6 条 SQL 注入被淹没。
+    //
+    // 所以本轮先把候选告警收集起来,循环结束后按威胁类型聚合:
+    // 同类型来自 >= merge_threshold_ips 个不同 IP 时,合成一条"分布式"告警。
+    // -----------------------------------------------------------------------
+    struct Pending {
+        AlertRow row;
+        std::string ip;
+    };
+    std::vector<Pending> pending;
+
     for (auto& [ip, group] : by_ip) {
         if (!manual && groups_done >= cfg_.max_groups_per_round) break;
         if (!take_rate_token()) {
@@ -132,7 +192,7 @@ bool Analyzer::do_round(int batch, bool manual) {
         if (!parse_verdict(res.content, v, perr)) {
             ++stats_.parse_errors;
             LOG_WARN(kTag, "模型返回无法解析 ip=", ip, " 原因=", perr,
-                     " 原文前 120 字=", res.content.substr(0, 120));
+                     " 原文前 120 字=", utf8::truncate(res.content, 120));
             // 解析失败也标记,否则这条会永远卡在队列里反复烧钱
             for (const auto& r : group) analyzed_ids.push_back(r.id);
             continue;
@@ -164,22 +224,8 @@ bool Analyzer::do_round(int batch, bool manual) {
             }
             a.log_ids = ids;
 
-            std::int64_t new_id = 0;
-            if (dao_->insert_alert(a, new_id) == WriteResult::kOk) {
-                ++stats_.alerts_created;
-                ++alerts;
-                LOG_INFO(kTag, "已生成告警 id=", new_id, " ip=", ip,
-                         " 类型=", a.threat_type, " 置信度=", a.confidence);
-                // 推一次通知。失败不影响流程 —— 告警已经落库了,
-                // 通知只是"让人尽快知道",不是可靠投递。
-                if (notifier_ && notifier_->enabled()) {
-                    if (notifier_->notify(a, new_id)) ++stats_.notified;
-                    else ++stats_.notify_failed;
-                }
-            } else {
-                LOG_ERROR(kTag, "写告警失败 ip=", ip);
-                continue;   // 写失败就不标记,下轮再试
-            }
+            // 先攒着,循环结束后统一决定"逐条写"还是"聚合成一条"
+            pending.push_back(Pending{std::move(a), ip});
         } else if (!v.is_attack) {
             ++stats_.skipped_not_attack;
         } else {
@@ -187,6 +233,126 @@ bool Analyzer::do_round(int batch, bool manual) {
         }
 
         for (const auto& r : group) analyzed_ids.push_back(r.id);
+    }
+
+    // -----------------------------------------------------------------------
+    // 告警聚合:把"很多 IP 做同一件事"合成一条
+    //
+    // 判据:同一 threat_type 来自 >= merge_threshold_ips 个不同 IP。
+    // 分布式扫描的特征就是"每个 IP 都只打几下",按 IP 分组后全是碎片,
+    // 逐条发告警会把真正的高危事件淹没。
+    // -----------------------------------------------------------------------
+    {
+        // 分组用规范化后的类型:模型对同一行为会给出 PROBE / PROBING / SCANNING,
+        // 按原文精确分组会让聚合永远不触发(第一次实现就是这个坑)。
+        std::map<std::string, std::vector<std::size_t>> by_type;
+        for (std::size_t i = 0; i < pending.size(); ++i) {
+            by_type[canonical_threat(pending[i].row.threat_type)].push_back(i);
+        }
+
+        for (auto& [type, idxs] : by_type) {
+            std::set<std::string> ips;
+            for (auto i : idxs) ips.insert(pending[i].ip);
+
+            const bool merge = cfg_.merge_threshold_ips > 1 &&
+                               static_cast<int>(ips.size()) >= cfg_.merge_threshold_ips;
+
+            if (!merge) {
+                for (auto i : idxs) {
+                    std::int64_t new_id = 0;
+                    const AlertRow& row = pending[i].row;
+                    if (dao_->insert_alert(row, new_id) == WriteResult::kOk) {
+                        ++stats_.alerts_created;
+                        ++alerts;
+                        LOG_INFO(kTag, "已生成告警 id=", new_id, " ip=", pending[i].ip,
+                                 " 类型=", row.threat_type, " 置信度=", row.confidence);
+                        if (notifier_ && notifier_->enabled()) {
+                            if (notifier_->notify(row, new_id)) ++stats_.notified;
+                            else ++stats_.notify_failed;
+                        }
+                    } else {
+                        LOG_ERROR(kTag, "写告警失败 ip=", pending[i].ip);
+                    }
+                }
+                continue;
+            }
+
+            // ---- 聚合成一条 ----
+            AlertRow agg;
+            agg.ip = "multi(" + std::to_string(ips.size()) + ")";
+            // 类型用出现最多的那个原始写法(不是规范化后的键),
+            // 否则告警里会出现 "SENSITIVE_FILE" 这种被截断的名字。
+            {
+                std::map<std::string, int> freq;
+                for (auto i : idxs) ++freq[pending[i].row.threat_type];
+                std::string best_type;
+                int best_n = -1;
+                for (const auto& [t, n] : freq) {
+                    if (n > best_n) { best_n = n; best_type = t; }
+                }
+                agg.threat_type = best_type;
+            }
+            agg.severity = "MEDIUM";
+            agg.confidence = 0.0;
+            agg.status = 0;
+
+            // 级别取最高、置信度取最高;理由以置信度最高的那条为主
+            int best = idxs[0];
+            for (auto i : idxs) {
+                if (severity_rank(pending[i].row.severity) > severity_rank(agg.severity)) {
+                    agg.severity = pending[i].row.severity;
+                }
+                if (pending[i].row.confidence > agg.confidence) {
+                    agg.confidence = pending[i].row.confidence;
+                    best = static_cast<int>(i);
+                }
+            }
+
+            // 来源 IP 列表(最多列 8 个)
+            std::string ip_list;
+            int shown = 0;
+            for (const auto& one : ips) {
+                if (shown++ >= 8) { ip_list += "..."; break; }
+                if (!ip_list.empty()) ip_list += ", ";
+                ip_list += one;
+            }
+
+            std::string rep = pending[best].row.reasoning;
+            // 必须按 UTF-8 边界截断:中文一个字符占 3 字节,substr 会切断字符,
+            // 产生非法 UTF-8,MySQL 直接拒收(code=1366)。实测踩过这个坑。
+            rep = utf8::truncate_with_ellipsis(rep, 200);
+
+            agg.reasoning = "本轮有 " + std::to_string(ips.size()) +
+                            " 个不同来源 IP 命中同类规则(" + type +
+                            "),判定为**分布式扫描**而非单点攻击。来源: " + ip_list +
+                            "。代表判定(来自 " + pending[best].ip + "):" + rep;
+
+            // 合并 log_ids(注意列宽 1024)
+            std::string ids;
+            for (auto i : idxs) {
+                const std::string& one = pending[i].row.log_ids;
+                if (one.empty()) continue;
+                if (ids.size() + one.size() + 2 > 1000) break;
+                if (!ids.empty()) ids.push_back(',');
+                ids += one;
+            }
+            agg.log_ids = ids;
+
+            std::int64_t new_id = 0;
+            if (dao_->insert_alert(agg, new_id) == WriteResult::kOk) {
+                ++stats_.alerts_created;
+                ++alerts;
+                ++stats_.alerts_merged;
+                LOG_INFO(kTag, "已聚合告警 id=", new_id, " 类型=", type,
+                         " 合并 ", ips.size(), " 个 IP / ", idxs.size(), " 条个体告警");
+                if (notifier_ && notifier_->enabled()) {
+                    if (notifier_->notify(agg, new_id)) ++stats_.notified;
+                    else ++stats_.notify_failed;
+                }
+            } else {
+                LOG_ERROR(kTag, "写聚合告警失败 类型=", type);
+            }
+        }
     }
 
     if (!analyzed_ids.empty()) {

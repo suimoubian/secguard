@@ -35,6 +35,9 @@ struct AnalyzerStats {
     long long transport_errors = 0;
     long long parse_errors = 0;
     long long alerts_created = 0;
+    // 被聚合成"分布式扫描"的个体告警数(这些没有单独写库)。
+    // 和 alerts_created 一起看:合并数远大于创建数,说明来的主要是分布式扫描。
+    long long alerts_merged = 0;
     long long notified = 0;
     long long notify_failed = 0;
     long long skipped_low_confidence = 0;

@@ -50,6 +50,54 @@ private:
     std::unordered_map<std::string, Rec> recs_;
 };
 
+// ---------------------------------------------------------------------------
+// 封禁请求的审计降采样
+//
+// 背景(实测数据):上线第二天被一个云凭据扫描器打了 3.3 万次,
+// 命中规则后被封禁,但它继续刷了 7.5 小时,又发来 28,451 个请求。
+// 这些请求每一条都写了一条审计 —— 占全库 79%,而且全是同一句话
+// (action=BLOCK, rule_hit=IP_BANNED),没有任何信息量。
+//
+// 结果:审计表被垃圾撑大、AI 分析队列里塞满无意义记录、磁盘涨得快。
+//
+// 做法:同一个 IP 在被封禁期间,最多每 N 秒记一条审计。
+// 请求照样拒绝(403)、照样计入 requests_blocked —— 只是不再逐条落库。
+// 被压掉的条数记到 suppressed 计数器,/metrics 里能看到,不是悄悄丢。
+//
+// 为什么用内存 map 而不是 Redis:这是纯本地节流,不需要跨实例一致;
+// 多实例各管各的,最多多记几条,不影响正确性。走 Redis 反而给每个被 ban
+// 的请求加一次往返,与"封禁是为了省成本"的初衷相悖。
+// ---------------------------------------------------------------------------
+class BanAuditSampler {
+public:
+    // 返回 true = 这次应当写审计
+    bool should_record(const std::string& ip, int interval_sec) {
+        if (interval_sec <= 0) return true;      // 0 = 关掉采样
+
+        const std::int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = last_.find(ip);
+        if (it != last_.end() && now - it->second < interval_sec) {
+            ++suppressed_;
+            return false;
+        }
+        // 防止 map 无限增长:攻击者可以换几万个 IP 来刷。
+        // 超过上限直接清空 —— 代价是清空那一刻会多记几条,可以接受。
+        if (last_.size() > 20000) last_.clear();
+        last_[ip] = now;
+        return true;
+    }
+
+    [[nodiscard]] std::int64_t suppressed() const { return suppressed_.load(); }
+
+private:
+    mutable std::mutex mu_;
+    std::unordered_map<std::string, std::int64_t> last_;
+    std::atomic<std::int64_t> suppressed_{0};
+};
+
 struct AppContext {
     Config           cfg;
     ConnectionPool*  pool = nullptr;
@@ -61,6 +109,7 @@ struct AppContext {
     LoginThrottle*   login_throttle = nullptr;
     LlmClient*       llm = nullptr;
     Analyzer*        analyzer = nullptr;
+    BanAuditSampler* ban_sampler = nullptr;   // 可为 nullptr(不采样)
 
     std::atomic<std::int64_t> requests_total{0};
     std::atomic<std::int64_t> requests_blocked{0};

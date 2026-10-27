@@ -4,7 +4,10 @@
 # 为什么要在本地模拟:CI 挂了要等推送之后才知道,来回一轮好几分钟。
 # 这些检查本地都能跑,先过一遍再推。
 
-cd /home/smb/projects/secguard || exit 1
+# 按脚本自身位置定位项目根,而不是写死某一台机器的绝对路径。
+# (原来写的是 cd /home/smb/projects/secguard,换机器或换用户名就跑不了 ——
+#  而"换机器"恰恰是这个脚本最该支持的场景:部署到新服务器之后还要跑它。)
+cd "$(dirname "$0")/.." || exit 1
 FAIL=0
 
 step() { printf '\n\033[1m>>> %s\033[0m\n' "$1"; }
@@ -67,6 +70,17 @@ if ./build-ci/waf_eval --rules rules/attack_patterns.txt \
 else
     bad "评测门禁未通过"
     grep -E '变形样本|正常样本|门禁' /tmp/ci-eval.log | head -6
+fi
+
+step "5c. 规则库体检(结构性问题直接失败)"
+# 这一类问题的共同点:**不会报错,只会静默改变行为**。
+# 比如行首是 # 的规则被当注释丢掉、特征文本的尾空格被 trim 掉 ——
+# 文件里看着是 A,实际跑的是 B。只能靠自动检查卡住。
+if ./build-ci/waf_eval --rules rules/attack_patterns.txt --lint-rules > /tmp/ci-lint.log 2>&1; then
+    ok "$(grep -E '^规则 ' /tmp/ci-lint.log)"
+else
+    bad "规则库有结构性问题"
+    grep -E '必须修' /tmp/ci-lint.log | head -10
 fi
 
 step "6. DAO 层测试(没有数据库会自动跳过)"

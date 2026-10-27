@@ -233,6 +233,41 @@ int main() {
         std::remove(path.c_str());
     }
 
+    std::printf("\n=== 3d. 规则加载的静默陷阱 ===\n");
+    {
+        // 这三行分别对应三个曾经"无声出错"的场景,见 engine.cpp 的注释:
+        //   1. 注释行里带 TAB  —— 看起来是规则,实际被整行丢弃(SQL-033 就这样死的)
+        //   2. 行首 `\#`        —— 唯一能表达"特征以 # 开头"的写法
+        //   3. 特征尾部带空格    —— 加载时被 trim,文件与行为不一致
+        const std::string path = "/tmp/secguard-rules-trap.txt";
+        {
+            std::ofstream f(path);
+            f << "# 普通注释,不带 TAB\n";
+            f << "#\tT-DEAD\tXSS\tMEDIUM\n";
+            f << "\\#hash\tT-HASH\tXSS\tMEDIUM\n";
+            f << "select \tT-SPACE\tSQL_INJECTION\tHIGH\n";
+        }
+        EngineConfig c;
+        c.pattern_file = "";
+        c.allowlist_file = "";
+        c.policy_file = "";
+        Engine e;
+        std::string err;
+        check(e.load_from_file(path, c, err), "含陷阱的规则文件仍能加载");
+        check(e.rule_count() == 2, "被注释吞掉的那条不计入(应剩 2 条)");
+
+        bool hash_ok = false;
+        bool space_trimmed = false;
+        for (std::size_t i = 0; i < e.rule_count(); ++i) {
+            const Rule& r = e.rule(static_cast<std::int32_t>(i));
+            if (r.id == "T-HASH") hash_ok = (r.text == "#hash");
+            if (r.id == "T-SPACE") space_trimmed = (r.text == "select");
+        }
+        check(hash_ok, "行首 \\# 转义后是字面 #");
+        check(space_trimmed, "尾空格被 trim(加载时会打 WARN)");
+        std::remove(path.c_str());
+    }
+
     std::printf("\n=== 4. HTTP -> 待检文本 ===\n");
     {
         bool truncated = false;

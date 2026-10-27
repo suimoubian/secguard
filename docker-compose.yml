@@ -136,6 +136,19 @@ services:
       SECGUARD_HIT_THRESHOLD: ${SECGUARD_HIT_THRESHOLD:-20}
       SECGUARD_BAN_SECONDS: ${SECGUARD_BAN_SECONDS:-1800}
 
+      # -----------------------------------------------------------------------
+      # 两个"实战得到"的参数
+      #
+      # 教训:加一个新配置项要改**三处** —— config.cpp(读)、.env.example(文档)、
+      # 和这里(传给容器)。少改最后这一处,程序读到的永远是代码默认值,
+      # .env 里写什么都没用。实测踩过:聚合门槛在 .env 设成 2,
+      # 容器里还是默认的 3,聚合一直不触发,查了半小时。
+      # -----------------------------------------------------------------------
+      # 被封禁的 IP 继续刷请求时,审计记录的最小间隔(秒)。0 = 每条都记。
+      SECGUARD_BAN_AUDIT_INTERVAL: ${SECGUARD_BAN_AUDIT_INTERVAL:-60}
+      # 同轮内同类威胁来自 >= N 个不同 IP 时,聚合成一条"分布式扫描"告警。
+      SECGUARD_AI_MERGE_IPS: ${SECGUARD_AI_MERGE_IPS:-3}
+
       # ---- AI 分析层(W6)----
       # 默认关闭:没有 API Key 就不该跑。
       # 要演示可以设 SECGUARD_LLM_PROVIDER=mock(不联网,结果会是假数据)。

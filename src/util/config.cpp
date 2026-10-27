@@ -122,6 +122,14 @@ bool Config::load(Config& out, std::string& err) {
     if (!env_int("SECGUARD_HIT_WINDOW", out.guard.window_seconds)) { err = "SECGUARD_HIT_WINDOW 不是整数"; return false; }
     if (!env_int("SECGUARD_HIT_THRESHOLD", out.guard.hit_threshold)) { err = "SECGUARD_HIT_THRESHOLD 不是整数"; return false; }
     if (!env_int("SECGUARD_BAN_SECONDS", out.guard.ban_seconds)) { err = "SECGUARD_BAN_SECONDS 不是整数"; return false; }
+    if (!env_int("SECGUARD_BAN_AUDIT_INTERVAL", out.guard.ban_audit_interval_sec)) {
+        err = "SECGUARD_BAN_AUDIT_INTERVAL 不是整数";
+        return false;
+    }
+    if (out.guard.ban_audit_interval_sec < 0) {
+        err = "SECGUARD_BAN_AUDIT_INTERVAL 不能为负(0 表示每条都记)";
+        return false;
+    }
 
     // --- Redis:限流 / 封禁 / 重放的共享状态(第 39 讲) ---
     out.redis.host     = env_str("SECGUARD_REDIS_HOST", out.redis.host);
@@ -184,6 +192,11 @@ bool Config::load(Config& out, std::string& err) {
     if (!env_int("SECGUARD_AI_MAX_GROUPS", out.ai.max_groups_per_round)) { err = "SECGUARD_AI_MAX_GROUPS 不是整数"; return false; }
     if (!env_int("SECGUARD_AI_RPM", out.ai.max_requests_per_minute)) { err = "SECGUARD_AI_RPM 不是整数"; return false; }
     if (!env_int("SECGUARD_AI_LOOKBACK_HOURS", out.ai.lookback_hours)) { err = "SECGUARD_AI_LOOKBACK_HOURS 不是整数"; return false; }
+    if (!env_int("SECGUARD_AI_MERGE_IPS", out.ai.merge_threshold_ips)) { err = "SECGUARD_AI_MERGE_IPS 不是整数"; return false; }
+    if (out.ai.merge_threshold_ips < 0) {
+        err = "SECGUARD_AI_MERGE_IPS 不能为负(0 或 1 表示不聚合)";
+        return false;
+    }
     {
         const char* mc = std::getenv("SECGUARD_AI_MIN_CONFIDENCE");
         if (mc && *mc) out.ai.min_confidence = std::strtod(mc, nullptr);
@@ -268,6 +281,13 @@ std::string Config::describe() const {
         << "  文本上限=" << engine.max_text_bytes << "B"
         << "  命中上限=" << engine.max_hits
         << "  热加载间隔=" << engine.reload_interval_seconds << "s\n"
+        // 归一化开关和策略文件必须打出来:线上排查时最常问的两句话就是
+        // "归一化开了吗"和"策略生效了吗",看不到就只能登机器翻环境变量。
+        << "  检测     归一化=" << (engine.extra_normalization
+               ? ("开(最多解 " + std::to_string(engine.normalize_decode_rounds) + " 层)")
+               : std::string("关(只做字面匹配)"))
+        << "  策略=" << engine.policy_file
+        << "  白名单=" << engine.allowlist_file << "\n"
         << "  防护     速率=" << guard.rate_per_sec << "/s 突发=" << guard.burst
         << "  封禁=" << guard.hit_threshold << "次/" << guard.window_seconds
         << "s -> " << guard.ban_seconds << "s\n"

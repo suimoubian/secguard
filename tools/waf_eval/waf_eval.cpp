@@ -241,13 +241,152 @@ std::string pct_delta(double after, double before) {
     return buf;
 }
 
+// ---------------------------------------------------------------------------
+// 规则库体检
+//
+// 存在的理由:规则文件里有三类问题**不会报错,只会静默改变行为**:
+//   1. 行首是 # 但带 TAB —— 看起来是规则,实际被当注释整行丢掉(SQL-033 就这样死了)
+//   2. 特征文本首尾带空白 —— 加载时被 trim,文件写 `select ` 实际是 `select`
+//   3. 一条规则是另一条的子串 —— 短的那条在本场景里永远命不中,是死规则
+// 前两类算"结构性问题",必须修(CI 里直接失败);第三类只是建议。
+// ---------------------------------------------------------------------------
+struct LintIssue {
+    int line;
+    std::string id;
+    std::string what;
+    bool fatal;
+};
+
+int lint_rules_file(const std::string& path) {
+    std::ifstream in(path);
+    if (!in) {
+        std::fprintf(stderr, "打不开规则文件: %s\n", path.c_str());
+        return 2;
+    }
+
+    std::vector<LintIssue> issues;
+    struct Entry { std::string text, id, cat; };
+    std::vector<Entry> entries;   // 体检用:特征 + 规则 ID + 类别
+    std::string line;
+    int lineno = 0;
+
+    auto rstrip = [](std::string s) {
+        while (!s.empty() && (s.back() == '\r' || s.back() == ' ')) s.pop_back();
+        return s;
+    };
+
+    while (std::getline(in, line)) {
+        ++lineno;
+        std::string t = rstrip(line);
+        if (t.empty()) continue;
+
+        if (t[0] == '#') {
+            // 结构性问题 1:注释行里带 TAB,八成是想写规则却把 # 写在行首
+            if (t.find('\t') != std::string::npos) {
+                issues.push_back({lineno, t.substr(0, 40),
+                                  "行首是 # 但带 TAB —— 会被当注释整行丢弃,规则从未生效",
+                                  true});
+            }
+            continue;
+        }
+
+        // 按 TAB 切,保留原始首字段用来检测首尾空白
+        std::vector<std::string> f;
+        std::size_t start = 0;
+        for (std::size_t i = 0; i <= t.size(); ++i) {
+            if (i == t.size() || t[i] == '\t') {
+                f.push_back(t.substr(start, i - start));
+                start = i + 1;
+            }
+        }
+        if (f.empty() || f[0].empty()) continue;
+
+        std::string text = f[0];
+        std::string id = f.size() >= 2 ? f[1] : ("R" + std::to_string(lineno));
+        std::string cat = f.size() >= 3 ? f[2] : "UNKNOWN";
+
+        // 结构性问题 2:首尾空白
+        std::string lead = text;
+        while (!lead.empty() && (lead.front() == ' ' || lead.front() == '\t')) lead.erase(lead.begin());
+        if (lead != text || rstrip(text) != text) {
+            issues.push_back({lineno, id,
+                              "特征文本首尾有空白,加载时会被 trim;如果本意是词边界,"
+                              "应该用归一化 + 策略表达,不能靠空格", true});
+            text = lead;
+            text = rstrip(text);
+        }
+
+        // 建议类:太短的特征
+        if (text.size() <= 2) {
+            issues.push_back({lineno, id,
+                              "特征只有 " + std::to_string(text.size()) +
+                              " 字节,误报风险极高(考虑降为 ALERT)", false});
+        }
+        entries.push_back({text, id, cat});
+    }
+
+    // 建议类:重复 + 子串冗余
+    std::map<std::string, std::vector<std::string>> by_text;
+    for (const auto& e : entries) by_text[e.text].push_back(e.id);
+    for (const auto& [text, ids] : by_text) {
+        if (ids.size() > 1) {
+            std::string joined;
+            for (const auto& i : ids) joined += (joined.empty() ? "" : ",") + i;
+            issues.push_back({0, joined,
+                              "特征重复: `" + text + "` 出现 " + std::to_string(ids.size()) + " 次",
+                              false});
+        }
+    }
+    // 子串检查**不做**了。
+    // 一开始我加了"短规则是长规则的子串就算冗余",跑出来 20 条 —— 但那是错的:
+    // 这个引擎是"所有命中都上报",不是首命中即停。`select` 和 `union select 1`
+    // 同时存在是**故意的**:宽的负责广度(留下线索),窄的负责精确(决定处置级别)。
+    // 只有当引擎采用"首命中即停"时,子串才会造成死规则。删掉这一项,
+    // 免得以后有人照着"建议"去删规则,把广度删没了。
+
+    int fatal = 0;
+    int warn = 0;
+    for (const auto& it : issues) {
+        if (it.fatal) ++fatal; else ++warn;
+    }
+
+    std::printf("# 规则库体检\n\n");
+    std::printf("规则 %zu 条,问题 %d 个(结构性 %d / 建议 %d)\n\n",
+                entries.size(), static_cast<int>(issues.size()), fatal, warn);
+
+    if (!issues.empty()) {
+        std::printf("| 严重度 | 行 | 规则 | 问题 |\n|---|---|---|---|\n");
+        // 结构性问题排在前面
+        std::stable_sort(issues.begin(), issues.end(),
+                         [](const LintIssue& a, const LintIssue& b) {
+                             return a.fatal && !b.fatal;
+                         });
+        for (const auto& it : issues) {
+            std::printf("| %s | %s | `%s` | %s |\n",
+                        it.fatal ? "**必须修**" : "建议",
+                        it.line ? std::to_string(it.line).c_str() : "—",
+                        it.id.c_str(), it.what.c_str());
+        }
+        std::printf("\n");
+    }
+
+    if (fatal == 0) {
+        std::printf("结构性检查通过(没有会被静默丢弃或被静默改写的规则)。\n");
+        return 0;
+    }
+    std::printf("有 %d 个结构性问题必须修:它们会让「文件写的」和「实际跑的」不一致。\n", fatal);
+    return 1;
+}
+
+
+
 struct Group {
     Count all;
-    Count hit_baseline;     // 基线样本里被检出的
+    Count hit_baseline;        // 基线样本里被检出的
     Count variant_meaningful;  // 变形样本里"基线命中"的(有效分母)
-    Count variant_hit;      // 其中加固后仍检出
-    Count block_meaningful; // 变形样本里"基线会被拦"的(拦截维度的分母)
-    Count block_hit;        // 其中加固后仍会被拦
+    Count variant_hit;         // 其中加固后仍检出
+    Count block_meaningful;    // 变形样本里"基线会被拦"的(拦截维度的分母)
+    Count block_hit;           // 其中加固后仍会被拦
 };
 
 // 一次评测的全部统计。检出(命中)和拦截(403)是两个维度:
@@ -287,6 +426,7 @@ int main(int argc, char** argv) {
     std::string out_verdicts;
     int perf_repeat = 20;
     bool dump_rules = false;
+    bool lint_rules = false;
     double max_miss = -1.0;   // <0 = 不设门禁
     double max_fp = -1.0;
 
@@ -306,16 +446,22 @@ int main(int argc, char** argv) {
         else if (a == "--miss")   out_miss = next("--miss");
         else if (a == "--repeat") perf_repeat = std::stoi(next("--repeat"));
         else if (a == "--dump-rules") dump_rules = true;
+        else if (a == "--lint-rules") lint_rules = true;
         else if (a == "--max-miss") max_miss = std::stod(next("--max-miss"));
         else if (a == "--max-fp")   max_fp = std::stod(next("--max-fp"));
         else if (a == "--verdicts") out_verdicts = next("--verdicts");
         else {
             std::fprintf(stderr,
                 "用法: %s [--rules 规则文件] [--policy 策略文件] [--corpus 语料目录]\n"
-                "        [--out 报告.md] [--miss 漏报清单.md] [--repeat N] [--dump-rules]\n",
-                argv[0]);
+                "        [--out 报告.md] [--miss 漏报清单.md] [--repeat N]\n"
+                "        [--dump-rules] [--lint-rules]\n", argv[0]);
             return 2;
         }
+    }
+
+    // 规则库体检:只读文件、不建表,CI 里可以单独跑。
+    if (lint_rules) {
+        return lint_rules_file(rules_path);
     }
 
     // 把"引擎实际用的"规则打出来。注意不是直接 cat 规则文件 ——
