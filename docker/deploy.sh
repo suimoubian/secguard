@@ -119,7 +119,17 @@ cmd_deploy() {
     check_prereq
 
     if docker image inspect secguard-app:latest > /dev/null 2>&1; then
-        say "==> 镜像已存在,跳过构建(要强制重建: docker compose build --no-cache)"
+        # 这里必须把"镜像是什么时候做的"打出来。
+        # 原来的实现只写一句"跳过构建" —— 改完规则或代码后直接跑本脚本,
+        # 会拿旧镜像重启,服务看起来一切正常,实际跑的还是上一个版本。
+        # 这不是假设:规则从 234 涨到 252 那次,线上就是在旧镜像上停了一天。
+        local created
+        created=$(docker image inspect -f '{{.Created}}' secguard-app:latest 2>/dev/null | cut -c1-19)
+        say "==> 镜像已存在(创建于 ${created} UTC),跳过构建"
+        warn "    如果刚改过代码或 rules/,这个镜像可能是旧的。正确做法:"
+        warn "      本地: docker compose build app && docker save secguard-app:latest | gzip -1 > sg-image.tar.gz"
+        warn "            scp sg-image.tar.gz <user>@<host>:~/ && ssh <user>@<host> 'gunzip -c ~/sg-image.tar.gz | docker load'"
+        warn "      然后回来重跑本脚本。"
     else
         check_build_memory
         say "==> 构建镜像"
