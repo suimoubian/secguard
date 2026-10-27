@@ -21,7 +21,22 @@ set -u
 
 BASE="${1:-http://127.0.0.1:8088}"
 ADMIN_USER="${SG_ADMIN_USER:-admin}"
-ADMIN_PASS="${SG_ADMIN_PASS:-admin-password-2026}"
+# 管理员口令的取值顺序:
+#   1. 环境变量 SG_ADMIN_PASS
+#   2. 服务器上的 ~/.admin_password(部署脚本生成的真实口令)
+#   3. 开发默认值 admin-password-2026
+#
+# 为什么加第 2 条:实测在服务器上直接跑 ./scripts/verify.sh 时,第 3 条
+# 那个默认口令是错的,于是管理接口、AI 层、热加载、指标、审计统计
+# 这 5 组全部"跳过" —— 而屏幕上显示的仍然是"失败 0",很容易被当成
+# 全绿。跳过和通过是两件事,不能靠人记得去读环境变量。
+if [ -n "${SG_ADMIN_PASS:-}" ]; then
+    ADMIN_PASS="$SG_ADMIN_PASS"
+elif [ -r "$HOME/.admin_password" ]; then
+    ADMIN_PASS="$(cat "$HOME/.admin_password")"
+else
+    ADMIN_PASS="admin-password-2026"
+fi
 SKIP_ADMIN="${SG_SKIP_ADMIN:-0}"
 
 PASS=0; FAIL=0; SKIP=0

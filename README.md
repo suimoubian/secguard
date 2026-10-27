@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/suimoubian/secguard/actions/workflows/ci.yml/badge.svg)](https://github.com/suimoubian/secguard/actions/workflows/ci.yml)
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-blue)
-![Tests](https://img.shields.io/badge/自检-52%20项-2ea44f)
+![Tests](https://img.shields.io/badge/自检-54%20项-2ea44f)
 
 用 C++ 实现的高性能安全审计引擎:手写 **AC 自动机(Aho-Corasick)** 做多模式攻击特征匹配,
 配合 Web 接入层、多级防护与 **LLM 离线分析**,构成完整的分层流量审计告警系统。
@@ -49,7 +49,7 @@
 | W11 | **规则分级 BLOCK/ALERT** + 策略文件(把"看见"和"拦下"分开) | ✅ **完成** |
 | W12 | **真实流量驱动的三项改进**:规则补全 18 条、审计降采样、告警聚合 | ✅ **完成** |
 
-规模:**70 余个文件、约 8100 行源码**,自检 52 项全过,**已上线**(见 [docs/部署记录.md](docs/部署记录.md))。
+规模:**70 余个文件、约 8100 行源码**,自检 54 项全过,**已上线**(见 [docs/部署记录.md](docs/部署记录.md))。
 
 ### W10 / W11:从"能拦"到"拦得准"
 
