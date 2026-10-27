@@ -50,3 +50,11 @@ ben-45	BENIGN	object-string	query	q=%5Bobject%20Object%5D	-
 ben-46	BENIGN	image-src	path	/uploads/2026/10/avatar-1024.png	-
 ben-47	BENIGN	json-nested	body	{"items":[{"id":1,"qty":2}],"total":3}	-
 ben-48	BENIGN	chinese-comment	body	{"content":"这段代码里用了 select 语句,注意参数化"}	-
+// 下面四条是补测出来的:凡是会贴代码/CSS 的站点,正文里都必然出现注释。
+// SQL-031(`/*!`)和 SQL-032(`*/`)原本对这两个字符序列一律 403,
+// 实测 4 条里误伤 2 条 —— 误拦截率因此从 3.8% 涨到 7.7%。
+// 这两条规则后来降成了 ALERT,这四条就是那条结论的回归样本。
+ben-49	BENIGN	css-banner-comment	body	{"css":"/*! normalize.css v8.0.1 | MIT License */"}	-
+ben-50	BENIGN	code-comment	body	{"code":"/* note */ int x = 1; /* end */"}	-
+ben-51	BENIGN	markdown-heading	body	{"md":"## 安装说明\n\n运行 make 即可"}	-
+ben-52	BENIGN	comment-in-query	query	q=%2F*%20hello%20*%2F	-
