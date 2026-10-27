@@ -1,7 +1,17 @@
 # SecGuard
 
+[![CI](https://github.com/suimoubian/secguard/actions/workflows/ci.yml/badge.svg)](https://github.com/suimoubian/secguard/actions/workflows/ci.yml)
+![C++20](https://img.shields.io/badge/C%2B%2B-20-blue)
+![Tests](https://img.shields.io/badge/自检-52%20项-2ea44f)
+
 用 C++ 实现的高性能安全审计引擎:手写 **AC 自动机(Aho-Corasick)** 做多模式攻击特征匹配,
 配合 Web 接入层、多级防护与 **LLM 离线分析**,构成完整的分层流量审计告警系统。
+
+> **CI 是绿的意味着什么**:每次提交,GitHub 会起一台**全新的、干净的** Ubuntu 22.04,
+> 从零安装依赖 → 编译 → 检查零警告 → 跑 2 万次 AC 自动机对拍 → 跑单元测试 → 跑基准,
+> 全部通过才算绿。所以"代码能构建"不是我说了算,是每次提交都验过的。
+>
+> 一次完整 CI 约 9 分钟(其中 4 分钟是编译)。
 
 ## 一句话讲清楚它做什么
 
