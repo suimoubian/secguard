@@ -294,3 +294,43 @@ config.staging.json	CRED-014	CREDENTIAL_PROBE	MEDIUM
 config.toml	CRED-016	CREDENTIAL_PROBE	MEDIUM
 oss.json	CRED-017	CREDENTIAL_PROBE	MEDIUM
 cs.json	CRED-018	CREDENTIAL_PROBE	MEDIUM
+
+# ---------------------------------------------------------------------------
+# 第二批:CI/CD 配置 + IaC 状态文件 + 云厂商凭据(CRED-019 ~ CRED-033)
+#
+# 来源:2026-10-28 的 101.47.50.201,打了 5,146 次 / 10 小时。
+# 和上一批(阿里云凭据)不同,这一批找的是两样东西:
+#   1. CI/CD 流水线里硬编码的部署密钥(.gitlab-ci.yml / Jenkinsfile /
+#      .github/workflows/ / docker-compose.prod.yml)
+#   2. 前端打包产物里漏出来的云 API 密钥(/JS/TENCENT.JS / /BUNDLE.JS ...)
+#
+# 它对我们的规则库来说是 88% 白扫 —— 4,537 次请求命中不了任何规则。
+# 下面只补第一类。
+#
+# **第二类一条都没加**,这是有意的:
+#   bundle.js / vendor.js / app.js / main.js / sdk.js / oss.js / aliyun.js
+#   这些是**正常网站必然会有**的文件(前端打包产物、OSS 上传 SDK)。
+#   给它们写 BLOCK 规则,等于把任何正经前端项目打成 403 ——
+#   那不是防护,那是把自己变成故障源。
+#
+# 所以判据是:**这个文件本来就不该被当成静态资源对外提供吗?**
+#   该 -> 加规则。不该 -> 攻击者探它也只能拿到我们自己 404,无害。
+#
+# 其中 5 条降成 ALERT(见 rules/policy.conf),因为技术博客正文里
+# 确实可能提到 .gitlab-ci.yml / Jenkinsfile / serverless.yml 这些名字。
+# ---------------------------------------------------------------------------
+.circleci/config	CRED-019	CREDENTIAL_PROBE	HIGH
+docker-compose.prod	CRED-020	CREDENTIAL_PROBE	HIGH
+terraform.tfvars	CRED-021	CREDENTIAL_PROBE	CRITICAL
+terraform.tfstate	CRED-022	CREDENTIAL_PROBE	CRITICAL
+qcloudconfig	CRED-023	CREDENTIAL_PROBE	HIGH
+tencentconfig	CRED-024	CREDENTIAL_PROBE	HIGH
+tencent_config	CRED-025	CREDENTIAL_PROBE	HIGH
+tencent.ini	CRED-026	CREDENTIAL_PROBE	HIGH
+credentials.txt	CRED-027	CREDENTIAL_PROBE	HIGH
+.github/workflows/	CRED-028	CREDENTIAL_PROBE	MEDIUM
+.gitlab-ci	CRED-029	CREDENTIAL_PROBE	MEDIUM
+jenkinsfile	CRED-030	CREDENTIAL_PROBE	MEDIUM
+serverless.yml	CRED-031	CREDENTIAL_PROBE	MEDIUM
+serverless.json	CRED-032	CREDENTIAL_PROBE	MEDIUM
+credential.json	CRED-033	CREDENTIAL_PROBE	MEDIUM
