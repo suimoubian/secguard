@@ -375,21 +375,39 @@ fi
 sec "12. 限流与封禁(会产生拦截,最后测)"
 # ---------------------------------------------------------------------------
 echo "  用并发请求压限流..."
+# ---------------------------------------------------------------------------
+# 靶子选 /health 而不是 /api/rules,强度也比以前低。
+#
+# 原来的写法是 `wrk -t2 -c20 -d3s $BASE/api/rules`。loopback 上 3 秒能打
+# 一万多次,其中八九千次拿到 429 —— 而**限流拒绝也要写审计**。
+# 实测后果:一次自检往审计表里塞了 7,963 行 429,而且两次自检(10-27 的
+# 27,115 次、10-28 的 10,114 次)把"今天有多少真实流量"这个数彻底搅乱了:
+# requests_total 里 63% 是自己打的,审计表里一半是 429。
+#
+# 改成 /health 有两个好处:
+#   1. /health 本来就不进审计(实测 0 行),不会污染攻击数据;
+#   2. 它同样要过限流/封禁这一层,所以这个用例要验的东西没变。
+# 强度降到 -t1 -c10 -d1s:突发上限是 400,1 秒 10 连接足够打空令牌桶,
+# 又不会制造上万条噪音。
+# ---------------------------------------------------------------------------
 n429=0
 if command -v wrk > /dev/null 2>&1; then
-    wrk_out=$(wrk -t2 -c20 -d3s "$BASE/api/rules" 2>/dev/null)
+    wrk_out=$(wrk -t1 -c10 -d1s "$BASE/health" 2>/dev/null)
     n429=$(echo "$wrk_out" | grep -oE 'Non-2xx or 3xx responses: [0-9]+' | grep -oE '[0-9]+$')
     n429=${n429:-0}
 else
     TMPC=$(mktemp)
     seq 1 200 | xargs -P 10 -I{} curl -s -o /dev/null -w '%{http_code}\n' \
-        --max-time 5 "$BASE/api/rules" 2>/dev/null > "$TMPC"
+        --max-time 5 "$BASE/health" 2>/dev/null > "$TMPC"
     n429=$(grep -c '^429$' "$TMPC" || true)
     n429=${n429:-0}
     rm -f "$TMPC"
 fi
 if [ "${n429:-0}" -gt 0 ]; then ok "限流生效(被限 $n429 次)"
 else skip "限流" "没触发(演示配置 50/s 突发 100)"; fi
+# 提醒一句:这一步产生的 429 仍会计入 requests_blocked 指标。
+# 所以看完自检后,requests_blocked 里有一部分是自检噪音,不是攻击。
+[ "${n429:-0}" -gt 0 ] && echo "         (注:这 $n429 次 429 会计入 requests_blocked,属自检噪音)"
 
 sleep 2
 

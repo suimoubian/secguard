@@ -122,7 +122,22 @@ bool run_guard(AppContext& ctx, const httplib::Request& req,
                 const auto t1 = std::chrono::steady_clock::now();
                 rec.cost_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
             }
-            record_audit(ctx, rec);
+            // 和被封禁一样降采样。
+            //
+            // 理由完全一致:限流拒绝是"高频、低信息量"的事件 —— 一次正常的
+            // 压测或前端重试风暴可以产生上万条 429,而它们的审计价值只有
+            // "这个 IP 在某段时间被限过",一条就够。
+            //
+            // 实测数据:自检脚本里的限流用例(wrk 打 1 秒)产生 264 条 429,
+            // 改之前用 /api/rules 打 3 秒是 7,963 条 —— 一次自检就往审计表
+            // 里塞八千行,把"今天有多少真实流量"这个数彻底搅乱。
+            //
+            // 计数不受影响:requests_blocked 照常 +1,被压掉的条数照常进
+            // secguard_audit_suppressed_total。
+            if (!ctx.ban_sampler ||
+                ctx.ban_sampler->should_record(rec.ip, ctx.cfg.guard.ban_audit_interval_sec)) {
+                record_audit(ctx, rec);
+            }
             return false;
 
         case GuardDecision::kAllow:
