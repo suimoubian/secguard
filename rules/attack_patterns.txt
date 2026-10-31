@@ -334,3 +334,32 @@ jenkinsfile	CRED-030	CREDENTIAL_PROBE	MEDIUM
 serverless.yml	CRED-031	CREDENTIAL_PROBE	MEDIUM
 serverless.json	CRED-032	CREDENTIAL_PROBE	MEDIUM
 credential.json	CRED-033	CREDENTIAL_PROBE	MEDIUM
+
+# ---------------------------------------------------------------------------
+# 第三批:单个高危端点(CMD-062 / PAT-036)
+#
+# 来源:2026-10-30 的真实扫描。流量已经很小(全天 445 条),但这两条值得加。
+#
+# CMD-062: Hadoop YARN 的未授权 RCE。
+#   YARN 的 ResourceManager REST API 里,POST /ws/v1/cluster/apps/new-application
+#   可以申请一个 application,再提交一个任意命令的 job —— 全过程不需要认证。
+#   打这个路径说明对方在找对外暴露的 YARN,得手就是直接执行命令。
+#   正常 Web 服务不会把这个路径当静态资源提供,所以 BLOCK 不会误伤。
+#   实测:10-30 有 20 次来自 2 个 IP。
+#
+# PAT-036: phpinfo 页面。
+#   这是 PHP 的调试页,泄露路径、扩展、环境变量、数据库连接串。生产环境
+#   不该存在;但开发/演示环境有时会留一个,所以降成 ALERT(见 policy.conf),
+#   记录但不拦 —— 真要拦是运维该做的事,不是 WAF 该赌的事。
+#   实测:10-30 有 4 次。
+#
+# 同期还观察到一类探测**故意没有加规则**:
+#   /mcp、/mcp/、/api/mcp、/sse —— 6 个不同 IP 各打一次,在找暴露在公网的
+#   MCP(Model Context Protocol)服务器。这类服务器常常没有鉴权,一旦暴露
+#   等于把 AI 的工具执行能力公开。
+#   没加的原因:/sse 是**通用的事件流接口**,正经 AI 应用也会用;
+#   /mcp 同理。给它们写 BLOCK 会把真实的 AI 功能打坏。
+#   这条观察记进 docs/演示素材.md —— 它是"AI 时代新增攻击面"的实证。
+# ---------------------------------------------------------------------------
+ws/v1/cluster/apps	CMD-062	CMD_INJECTION	CRITICAL
+phpinfo	PAT-036	PATH_TRAVERSAL	MEDIUM
