@@ -363,3 +363,27 @@ credential.json	CRED-033	CREDENTIAL_PROBE	MEDIUM
 # ---------------------------------------------------------------------------
 ws/v1/cluster/apps	CMD-062	CMD_INJECTION	CRITICAL
 phpinfo	PAT-036	PATH_TRAVERSAL	MEDIUM
+
+# ---------------------------------------------------------------------------
+# PAT-037  phpMyAdmin 类管理面板路径探测
+#
+# 来源:2026-11-01 的 161.132.42.237,128 次请求、0 次拦截 —— 全白扫。
+# 它把 phpMyAdmin 的路径变体刷了一遍(60 多种写法):
+#   /phpmyAdmin/index.php、/phpmyadmin6/、/PMA/、/db/phpMyAdmin3/、
+#   /sql/websql/、/sqlmanager/、/mysql/pMA/、/administrator/phpMyAdmin/
+#
+# 为什么是 ALERT 而不是 BLOCK:
+#   phpMyAdmin 是**可能真实存在**的管理面板。有些部署确实把它挂在
+#   /phpmyadmin/ 上——拦掉就是把管理员的入口打坏。WAF 不该赌这个。
+#   而且这些请求本来返回的就是 404,拦不拦安全效果一样。
+#
+# 那为什么还要加:
+#   加之前这些探测**完全不可见** —— rule_hit 为 NULL,
+#   而 AI 分析队列只收 rule_hit 非空的记录,所以它连聚合告警都进不去。
+#   加之后至少能:记进审计、进 AI 分析、出现在规则命中统计里。
+#
+# 覆盖范围:归一化层会把大小写折平,所以一条 phpmyadmin 就覆盖
+# /phpMyAdmin/、/PHPMYADMIN/、/phpMyAdmin1/、/_phpmyadmin/ 等绝大多数变体。
+# 只有 /PMA/ 这种缩写变体覆盖不到,量很小(4 次),没有单独加。
+# ---------------------------------------------------------------------------
+phpmyadmin	PAT-037	PATH_TRAVERSAL	MEDIUM
