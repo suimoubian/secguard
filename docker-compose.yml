@@ -168,6 +168,22 @@ services:
       # 注意:如果端点在宿主机上,容器里要用 host.docker.internal 或网桥网关地址,
       # 用 127.0.0.1 指的是容器自己。
       SECGUARD_ALERT_WEBHOOK: ${SECGUARD_ALERT_WEBHOOK:-}
+      # -----------------------------------------------------------------------
+      # 审计保留天数。
+      #
+      # 这个变量之前只写在 .env.example 里、忘了加到这一处,结果容器永远拿不到,
+      # 一直用代码默认的 7 天 —— 在 .env 里改成 30 也没用(和聚合门槛同一种错法,
+      # 第二次踩)。
+      #
+      # 7 天在实测中出了真问题:2026-11-04 的清理任务删掉了 10-26/10-27 两天的
+      # 数据,而那两天正好包含最大的一次真实攻击(69.5.7.147,33,821 次)。
+      # 证据没了 —— 幸好 11-02 的备份里还留着,已导出样本另存。
+      #
+      # 改成 30 天。按当前真实流量(约 400 行/天)30 天只有几 MB;
+      # 真正撑大表的是压测,而压测数据本来就该在跑完之后清掉。
+      # -----------------------------------------------------------------------
+      SECGUARD_AUDIT_RETENTION_DAYS: ${SECGUARD_AUDIT_RETENTION_DAYS:-30}
+
       SECGUARD_ALERT_MIN_SEVERITY: ${SECGUARD_ALERT_MIN_SEVERITY:-HIGH}
       SECGUARD_ALERT_TIMEOUT_MS: ${SECGUARD_ALERT_TIMEOUT_MS:-3000}
     networks: [backend]
