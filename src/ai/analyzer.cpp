@@ -6,6 +6,7 @@
 #include <set>
 #include <unordered_map>
 
+#include "db/analyze_policy.h"
 #include "util/log.h"
 #include "util/utf8.h"
 
@@ -79,16 +80,9 @@ Analyzer::Analyzer(LlmClient* client, Dao* dao, const AiConfig& cfg,
 }
 
 bool Analyzer::is_analyzable(const std::string& rule_hit) {
-    // 这些是"策略性拦截",不是攻击特征命中:已经说明问题了,
-    // 再送 LLM 判断一遍纯属浪费钱。
-    static const char* kPolicyOnly[] = {
-        "RATE_LIMITED", "IP_BANNED", "LOGIN_FAIL",
-        "REPLAY_MISSING_HEADERS", "REPLAY_STALE", "REPLAY_DUPLICATE",
-    };
-    for (const char* p : kPolicyOnly) {
-        if (rule_hit == p) return false;
-    }
-    return !rule_hit.empty();
+    // 判断逻辑收敛到 src/db/analyze_policy.h,和写库时的 analyzed 标记共用一套,
+    // 避免"SQL 一套、代码一套"再次对不上(ALERT 漏分析就是这么来的)。
+    return !rule_hit.empty() && !is_policy_hit(rule_hit);
 }
 
 bool Analyzer::take_rate_token() {
@@ -159,6 +153,14 @@ bool Analyzer::do_round(int batch, bool manual) {
     struct Pending {
         AlertRow row;
         std::string ip;
+        // 这条告警是哪几条审计记录得出的。落库成功才把这些 id 标成 analyzed。
+        //
+        // 为什么要单独带着:原来(没有聚合的版本)是"写库失败就 continue,
+        // 不把 id 放进 analyzed_ids",语义是"这一批下轮再试"。
+        // 改成聚合之后,analyzed_ids 是在循环里无条件收集的,
+        // 于是**告警写库失败也照样被标成已分析** —— 那批记录再也不会被分析,
+        // 告警永久丢失。线上真的发生过一次(UTF-8 截断导致 1366 错误)。
+        std::vector<std::int64_t> source_ids;
     };
     std::vector<Pending> pending;
 
@@ -224,15 +226,21 @@ bool Analyzer::do_round(int batch, bool manual) {
             }
             a.log_ids = ids;
 
-            // 先攒着,循环结束后统一决定"逐条写"还是"聚合成一条"
-            pending.push_back(Pending{std::move(a), ip});
-        } else if (!v.is_attack) {
-            ++stats_.skipped_not_attack;
+            // 这些 id 要跟着告警一起走:告警落库成功才标记,失败就不标记,
+            // 让下一轮重新分析(否则告警永久丢失)。
+            std::vector<std::int64_t> src;
+            src.reserve(group.size());
+            for (const auto& r : group) src.push_back(r.id);
+
+            pending.push_back(Pending{std::move(a), ip, std::move(src)});
+            // 注意:这里**不**往 analyzed_ids 里放,交给了 pending 带去。
         } else {
-            ++stats_.skipped_low_confidence;
+            // 不是攻击 / 置信度不够:没有告警要写,直接标记已分析即可。
+            if (!v.is_attack) ++stats_.skipped_not_attack;
+            else               ++stats_.skipped_low_confidence;
+            for (const auto& r : group) analyzed_ids.push_back(r.id);
         }
 
-        for (const auto& r : group) analyzed_ids.push_back(r.id);
     }
 
     // -----------------------------------------------------------------------
@@ -266,12 +274,16 @@ bool Analyzer::do_round(int batch, bool manual) {
                         ++alerts;
                         LOG_INFO(kTag, "已生成告警 id=", new_id, " ip=", pending[i].ip,
                                  " 类型=", row.threat_type, " 置信度=", row.confidence);
+                        // 落库成功才标记这批记录已分析
+                        for (auto id : pending[i].source_ids) analyzed_ids.push_back(id);
                         if (notifier_ && notifier_->enabled()) {
                             if (notifier_->notify(row, new_id)) ++stats_.notified;
                             else ++stats_.notify_failed;
                         }
                     } else {
-                        LOG_ERROR(kTag, "写告警失败 ip=", pending[i].ip);
+                        // 不标记:下一轮会重新分析,不会把告警丢掉
+                        LOG_ERROR(kTag, "写告警失败 ip=", pending[i].ip,
+                                  ",这 ", pending[i].source_ids.size(), " 条记录保留待下轮重试");
                     }
                 }
                 continue;
@@ -345,12 +357,20 @@ bool Analyzer::do_round(int batch, bool manual) {
                 ++stats_.alerts_merged;
                 LOG_INFO(kTag, "已聚合告警 id=", new_id, " 类型=", type,
                          " 合并 ", ips.size(), " 个 IP / ", idxs.size(), " 条个体告警");
+                // 聚合成功:把所有参与的记录都标记已分析
+                for (auto i : idxs) {
+                    for (auto id : pending[i].source_ids) analyzed_ids.push_back(id);
+                }
                 if (notifier_ && notifier_->enabled()) {
                     if (notifier_->notify(agg, new_id)) ++stats_.notified;
                     else ++stats_.notify_failed;
                 }
             } else {
-                LOG_ERROR(kTag, "写聚合告警失败 类型=", type);
+                // 不标记:这些记录下一轮会重新进来,不会把告警丢掉
+                int n_ids = 0;
+                for (auto i : idxs) n_ids += static_cast<int>(pending[i].source_ids.size());
+                LOG_ERROR(kTag, "写聚合告警失败 类型=", type,
+                          ",这 ", n_ids, " 条记录保留待下轮重试");
             }
         }
     }

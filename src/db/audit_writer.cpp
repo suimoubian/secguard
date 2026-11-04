@@ -29,7 +29,14 @@ void AuditWriter::start() {
 }
 
 void AuditWriter::submit(const AuditLogRow& row) {
-    if (!running_.load()) return;
+    if (!running_.load()) {
+        // 停机过程中(或还没 start)仍可能有请求进来调用这里。
+        // 这些记录写不进去了,但必须**计数** —— 原来这里是直接 return,
+        // 停了之后那几条会被静默吞掉,dropped 却不增加,
+        // 事后无法解释"审计数比请求数少了几条"。
+        dropped_.fetch_add(1);
+        return;
+    }
     if (!queue_.push(row)) {
         // 队列满:丢弃并计数。审计不能反压主链路(第 28 讲)
         dropped_.fetch_add(1);

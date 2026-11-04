@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include "crypto/auth_crypto.h"
+#include "db/analyze_policy.h"
 #include "util/log.h"
 #include "util/utf8.h"
 
@@ -411,6 +412,12 @@ void record_audit(AppContext& ctx, const ScanRecord& rec) {
     row.action        = rec.action;
     row.status_code   = rec.status_code;
     row.cost_us       = rec.cost_us;
+
+    // 要不要送 LLM 分析,在**写入时**就定下来:
+    //   需要分析(BLOCK/ALERT 且命中非策略性规则) -> analyzed=0
+    //   永远不分析(PASS、IP_BANNED、RATE_LIMITED...)  -> analyzed=1
+    // 这样分析队列里只有真正待分析的记录,索引也不会被垃圾占着。
+    row.analyzed      = needs_llm_analysis(rec.action, rec.rule_hit) ? 0 : 1;
 
     // 异步:只入队(纳秒级),后台线程批量落库,不拖慢请求(第 28 讲)
     if (ctx.audit) {

@@ -59,6 +59,15 @@ struct AuditLogRow {
     int          status_code = 0;
     std::int64_t cost_us = 0;
     std::string  created_at;
+    // 这条记录是否已经"处理完"了 AI 分析这一步。
+    //
+    // 原来写库时硬编码成 0,于是 PASS 和策略性拦截(IP_BANNED / RATE_LIMITED)
+    // 这些**永远不会被分析的记录**也一直是 analyzed=0:
+    // 白占 idx_analyzed 索引,分析器每一轮都要把它们捞出来再过滤掉。
+    // 实测:analyzed=0 的 4,034 条里有 3,835 条属于这类。
+    //
+    // 现在写入时就按"要不要分析"定好(见 src/db/analyze_policy.h)。
+    int          analyzed = 0;
 };
 
 // 一条告警(LLM 分析产出)

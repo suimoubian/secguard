@@ -49,7 +49,11 @@ CREATE TABLE IF NOT EXISTS `audit_log` (
   `created_at`    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_ip_time` (`ip`, `created_at`),
-  KEY `idx_analyzed` (`analyzed`, `created_at`)
+  KEY `idx_analyzed` (`analyzed`, `created_at`),
+  -- 保留策略每 10 分钟跑一次 DELETE ... WHERE created_at < X LIMIT N。
+  -- 没有这个索引时 EXPLAIN 是 type=ALL(全表扫描),表一大就白扫一遍。
+  -- 注意别和 post 表的 idx_created_at 混了,那是不同的表。
+  KEY `idx_created` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 告警表

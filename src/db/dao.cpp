@@ -309,7 +309,7 @@ bool Dao::write_audit_batch(const std::vector<AuditLogRow>& rows) {
                 "rule_hit, matched_len, action, status_code, cost_us, analyzed) VALUES ";
             for (std::size_t i = 0; i < n; ++i) {
                 if (i) sql += ',';
-                sql += "(?,?,?,?,?,?,?,?,?,?,?,0)";
+                sql += "(?,?,?,?,?,?,?,?,?,?,?,?)";
             }
 
             std::unique_ptr<sql::PreparedStatement> ps(lease->prepareStatement(sql));
@@ -330,6 +330,7 @@ bool Dao::write_audit_batch(const std::vector<AuditLogRow>& rows) {
                 ps->setString(p++, r.action);
                 ps->setInt(p++, r.status_code);
                 ps->setInt64(p++, r.cost_us);
+                ps->setInt(p++, r.analyzed);   // 由 record_audit 按"要不要分析"定
             }
             ps->executeUpdate();
         }
@@ -425,8 +426,16 @@ std::vector<AuditLogRow> Dao::fetch_unanalyzed(int limit, int lookback_hours) {
             "SELECT id, trace_id, ip, user_id, uri, method, params_digest, rule_hit, "
             "matched_len, action, status_code, cost_us, created_at "
             "FROM audit_log "
+            // 注意:ALERT 也要分析。
+            //
+            // 这里原来是 action = 'BLOCK',于是 ALERT 级记录**从来没被分析过**
+            // (2026-11-04 查出来:187 条 ALERT,analyzed=1 的是 0)。
+            // 而 ALERT 这个分层存在的意义就是"宽规则命中后交给 AI 判断真假",
+            // 一排除就等于把 PAT-037(phpmyadmin)、PAT-038(claude.md)、
+            // PAT-036/039(phpinfo) 这些"只为被看见"而加的规则全废掉了 ——
+            // 它们命中几百次,一条告警都没产生。
             "WHERE analyzed = 0 "
-            "  AND action = 'BLOCK' "
+            "  AND action IN ('BLOCK','ALERT') "
             "  AND rule_hit IS NOT NULL AND rule_hit <> '' "
             "  AND rule_hit NOT IN ('RATE_LIMITED','IP_BANNED','LOGIN_FAIL',"
             "                       'REPLAY_MISSING_HEADERS','REPLAY_STALE','REPLAY_DUPLICATE') "
