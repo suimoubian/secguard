@@ -269,6 +269,25 @@ bool Analyzer::do_round(int batch, bool manual) {
                 for (auto i : idxs) {
                     std::int64_t new_id = 0;
                     const AlertRow& row = pending[i].row;
+
+                    // ---- 跨轮次去重 ----
+                    // 同一个 IP 同类攻击在窗口内再次判定为攻击时,不新建告警,
+                    // 而是把这一轮的 log_ids/置信度合并进已有那条。
+                    //
+                    // 为什么需要:analyzer 里的聚合只解决"同一轮多个 IP",
+                    // 而同一个 IP 隔几轮又来一次会各建一条。实测 625 条告警
+                    // 摊在 108 个 IP 上,平均 5.8 条/IP,列表很快就不可读。
+                    std::int64_t exist = dao_->find_open_alert(
+                        row.ip, row.threat_type, cfg_.dedup_window_hours);
+                    if (exist > 0 &&
+                        dao_->touch_alert(exist, row.log_ids, row.confidence, row.severity)) {
+                        ++stats_.alerts_deduped;
+                        for (auto id : pending[i].source_ids) analyzed_ids.push_back(id);
+                        LOG_INFO(kTag, "合并进已有告警 id=", exist, " ip=", pending[i].ip,
+                                 " 类型=", row.threat_type, " (窗口内重复判定)");
+                        continue;
+                    }
+
                     if (dao_->insert_alert(row, new_id) == WriteResult::kOk) {
                         ++stats_.alerts_created;
                         ++alerts;
@@ -350,6 +369,10 @@ bool Analyzer::do_round(int batch, bool manual) {
             }
             agg.log_ids = ids;
 
+            // 聚合告警用合成 IP(multi(N)),**不做跨轮次去重**:
+            // 两轮的 multi(3) 可能是完全不同的 IP 集合,按这个 ip 去重会把
+            // 无关的攻击并到一起。聚合告警本来就是"本轮分布式扫描的一张快照",
+            // 每轮一条是合理的。
             std::int64_t new_id = 0;
             if (dao_->insert_alert(agg, new_id) == WriteResult::kOk) {
                 ++stats_.alerts_created;
@@ -386,7 +409,8 @@ bool Analyzer::do_round(int batch, bool manual) {
         std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
 
     LOG_INFO(kTag, "本轮完成:", groups_done, " 组 / ", rows.size(),
-             " 条记录,新增告警 ", alerts, " 条,耗时 ", stats_.last_round_ms, "ms",
+             " 条记录,新增告警 ", alerts, " 条,合并进已有 ",
+             stats_.alerts_deduped, " 次,耗时 ", stats_.last_round_ms, "ms",
              any_transport_error ? "(有调用失败,相关记录下轮重试)" : "");
     return groups_done > 0;
 }

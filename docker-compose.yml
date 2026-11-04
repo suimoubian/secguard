@@ -148,6 +148,9 @@ services:
       SECGUARD_BAN_AUDIT_INTERVAL: ${SECGUARD_BAN_AUDIT_INTERVAL:-60}
       # 同轮内同类威胁来自 >= N 个不同 IP 时,聚合成一条"分布式扫描"告警。
       SECGUARD_AI_MERGE_IPS: ${SECGUARD_AI_MERGE_IPS:-3}
+      # 跨轮次去重窗口(小时)。同一 IP 同类威胁在窗口内再次判定为攻击时,
+      # 合并进已有告警而不是新建。0 = 不去重。
+      SECGUARD_AI_DEDUP_HOURS: ${SECGUARD_AI_DEDUP_HOURS:-24}
 
       # ---- AI 分析层(W6)----
       # 默认关闭:没有 API Key 就不该跑。

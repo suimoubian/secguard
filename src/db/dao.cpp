@@ -440,7 +440,17 @@ std::vector<AuditLogRow> Dao::fetch_unanalyzed(int limit, int lookback_hours) {
             "  AND rule_hit NOT IN ('RATE_LIMITED','IP_BANNED','LOGIN_FAIL',"
             "                       'REPLAY_MISSING_HEADERS','REPLAY_STALE','REPLAY_DUPLICATE') "
             "  AND created_at >= (NOW() - INTERVAL ? HOUR) "
-            "ORDER BY id DESC LIMIT ?"));
+            // FIFO:取最旧的待分析记录。
+            //
+            // 原来这里是 ORDER BY id DESC(取最新),看着"最新鲜的先处理"很合理,
+            // 但队列语义错了 —— 流量一大,新记录源源不断插到前面,
+            // **旧记录永远轮不到**,24 小时后掉出 lookback 窗口就再也不可能被分析。
+            // 现在流量小(10 条/轮够用)所以没暴露,但这是设计缺陷。
+            //
+            // 改成 ASC 的代价:新攻击的告警延迟变大(要等前面的消化完)。
+            // 对"事后审计 + AI 判定"这个定位来说,完整性比新鲜度重要 ——
+            // 拦是规则层实时做的,AI 只负责事后理解。
+            "ORDER BY id ASC LIMIT ?"));
         ps->setInt(1, lookback_hours);
         ps->setInt(2, limit);
         std::unique_ptr<sql::ResultSet> rs(ps->executeQuery());
@@ -499,7 +509,8 @@ WriteResult Dao::insert_alert(const AlertRow& alert, std::int64_t& new_id) {
     try {
         std::unique_ptr<sql::PreparedStatement> ps(lease->prepareStatement(
             "INSERT INTO alert (ip, threat_type, severity, confidence, reasoning, "
-            "log_ids, status) VALUES (?, ?, ?, ?, ?, ?, ?)"));
+            "log_ids, status, last_seen, seen_count) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), 1)"));
         ps->setString(1, alert.ip);
         ps->setString(2, alert.threat_type);
         ps->setString(3, alert.severity);
@@ -518,6 +529,74 @@ WriteResult Dao::insert_alert(const AlertRow& alert, std::int64_t& new_id) {
         if (e.getErrorCode() == kErrDeadlock) return WriteResult::kDeadlock;
         LOG_ERROR(kTag, "insert_alert 失败 code=", e.getErrorCode(), " what=", e.what());
         return WriteResult::kError;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 跨轮次告警去重
+//
+// analyzer 里的聚合解决"同一轮多个 IP 做同一件事";
+// 这两个方法解决"同一个 IP 隔几轮又来一次"。
+//
+// 不去重的话,同一攻击者每天来三次就是三条独立告警,告警列表很快不可读。
+// 实测:625 条告警摊在 108 个 IP 上,平均 5.8 条/IP。
+// ---------------------------------------------------------------------------
+std::int64_t Dao::find_open_alert(const std::string& ip,
+                                  const std::string& threat_type,
+                                  int window_hours) {
+    if (ip.empty() || threat_type.empty()) return 0;
+    if (window_hours <= 0) window_hours = 24;
+    auto lease = pool_.acquire();
+    if (!lease) return 0;
+    try {
+        std::unique_ptr<sql::PreparedStatement> ps(lease->prepareStatement(
+            "SELECT id FROM alert "
+            "WHERE ip = ? AND threat_type = ? AND status = 0 "
+            "  AND last_seen >= (NOW() - INTERVAL ? HOUR) "
+            "ORDER BY id DESC LIMIT 1"));
+        ps->setString(1, ip);
+        ps->setString(2, threat_type);
+        ps->setInt(3, window_hours);
+        std::unique_ptr<sql::ResultSet> rs(ps->executeQuery());
+        return rs->next() ? rs->getInt64("id") : 0;
+    } catch (const sql::SQLException& e) {
+        LOG_ERROR(kTag, "find_open_alert 失败 code=", e.getErrorCode(),
+                  " what=", e.what());
+        return 0;   // 查不到就当没有 -> 退化成新建,不会丢告警
+    }
+}
+
+bool Dao::touch_alert(std::int64_t id, const std::string& log_ids,
+                      double confidence, const std::string& severity) {
+    if (id <= 0) return false;
+    auto lease = pool_.acquire();
+    if (!lease) return false;
+    try {
+        std::unique_ptr<sql::PreparedStatement> ps(lease->prepareStatement(
+            "UPDATE alert SET "
+            "  log_ids    = CASE "
+            "                 WHEN ? = '' THEN log_ids "
+            "                 WHEN CHAR_LENGTH(IFNULL(log_ids,'')) + CHAR_LENGTH(?) + 1 <= 1000 "
+            "                      THEN CONCAT(IFNULL(CONCAT(log_ids, ','), ''), ?) "
+            "                 ELSE ? END, "
+            "  confidence = GREATEST(confidence, ?), "
+            "  severity   = ?, "
+            "  last_seen  = NOW(), "
+            "  seen_count = seen_count + 1 "
+            "WHERE id = ?"));
+        ps->setString(1, log_ids);
+        ps->setString(2, log_ids);
+        ps->setString(3, log_ids);
+        ps->setString(4, log_ids);
+        ps->setDouble(5, confidence);
+        ps->setString(6, severity);
+        ps->setInt64(7, id);
+        ps->executeUpdate();
+        return true;
+    } catch (const sql::SQLException& e) {
+        LOG_ERROR(kTag, "touch_alert 失败 code=", e.getErrorCode(),
+                  " what=", e.what());
+        return false;
     }
 }
 

@@ -67,6 +67,10 @@ CREATE TABLE IF NOT EXISTS `alert` (
   `log_ids`     VARCHAR(1024) DEFAULT NULL,
   `status`      TINYINT       NOT NULL DEFAULT 0 COMMENT '0待处理 1已确认 2误报',
   `created_at`  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  -- 跨轮次去重:同一 ip + threat_type 在窗口内再次判定为攻击时,
+  -- 更新已有告警而不是新建一条(累加 log_ids、刷新 last_seen、seen_count+1)。
+  `last_seen`   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `seen_count`  INT           NOT NULL DEFAULT 1 COMMENT '同一 IP 同类攻击累计被判定几次',
   PRIMARY KEY (`id`),
   KEY `idx_status` (`status`),
   KEY `idx_ip` (`ip`)

@@ -81,6 +81,12 @@ struct AlertRow {
     std::string  log_ids;               // 逗号分隔的 audit_log.id
     int          status = 0;            // 0待处理 1已确认 2误报
     std::string  created_at;
+    // 跨轮次去重用:同一个 ip + threat_type 在窗口内再次被判为攻击时,
+    // 不新建一条,而是更新这条(累加 log_ids、刷新 last_seen、seen_count+1)。
+    // 没有这两个字段的话,同一攻击者反复来会堆出一串重复告警
+    // (实测:625 条告警 / 108 个 IP,平均每个 IP 5.8 条)。
+    int          seen_count = 1;
+    std::string  last_seen;
 };
 
 struct AlertStats {
@@ -145,6 +151,17 @@ public:
     bool mark_analyzed(const std::vector<std::int64_t>& ids);
 
     WriteResult insert_alert(const AlertRow& alert, std::int64_t& new_id);
+
+    // 找同一个 ip + threat_type 在窗口内"还没处理"的告警(跨轮次去重)。
+    // 返回 0 表示没有,应当新建。
+    [[nodiscard]] std::int64_t find_open_alert(const std::string& ip,
+                                               const std::string& threat_type,
+                                               int window_hours);
+
+    // 把新一轮的判定合并进已有告警:追加 log_ids、取更高的置信度/级别、
+    // last_seen 刷新、seen_count+1。返回 false 表示更新失败。
+    bool touch_alert(std::int64_t id, const std::string& log_ids,
+                     double confidence, const std::string& severity);
     [[nodiscard]] std::vector<AlertRow> list_alerts(int limit, int offset);
     [[nodiscard]] AlertStats alert_stats();
     // 人工改告警状态(1 已确认 / 2 误报)

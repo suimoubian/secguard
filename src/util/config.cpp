@@ -193,6 +193,8 @@ bool Config::load(Config& out, std::string& err) {
     if (!env_int("SECGUARD_AI_RPM", out.ai.max_requests_per_minute)) { err = "SECGUARD_AI_RPM 不是整数"; return false; }
     if (!env_int("SECGUARD_AI_LOOKBACK_HOURS", out.ai.lookback_hours)) { err = "SECGUARD_AI_LOOKBACK_HOURS 不是整数"; return false; }
     if (!env_int("SECGUARD_AI_MERGE_IPS", out.ai.merge_threshold_ips)) { err = "SECGUARD_AI_MERGE_IPS 不是整数"; return false; }
+    if (!env_int("SECGUARD_AI_DEDUP_HOURS", out.ai.dedup_window_hours)) { err = "SECGUARD_AI_DEDUP_HOURS 不是整数"; return false; }
+    if (out.ai.dedup_window_hours < 0) { err = "SECGUARD_AI_DEDUP_HOURS 不能为负"; return false; }
     if (out.ai.merge_threshold_ips < 0) {
         err = "SECGUARD_AI_MERGE_IPS 不能为负(0 或 1 表示不聚合)";
         return false;

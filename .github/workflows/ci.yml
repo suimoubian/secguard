@@ -141,3 +141,67 @@ jobs:
       - name: 收尾(停掉 MySQL)
         if: always()
         run: docker rm -f mysql || true
+
+# ===========================================================================
+# 第二个作业:ASan + UBSan
+#
+# 为什么单独开一个作业而不是塞进上面:
+#   1. sanitizer 要 Debug + 关优化,编出来的东西不能用来跑性能基准,
+#      混在一个 job 里会让人误以为基准是"带 sanitizer 的数字";
+#   2. 它失败的性质不同 —— 上面失败是"功能坏了",这里失败是"内存/UB 有问题",
+#      分开显示更容易判断;
+#   3. 两个 job 并行跑,墙钟时间几乎不增加。
+#
+# 为什么必须进 CI:
+#   README / 简历 / 讲稿里都写了"ASan + UBSan 零报错",但在此之前**只在本地
+#   手动跑过一次**,CI 从不验证 —— 和"有 CI 但从没跑过"是同一类问题。
+#   声明过的验证方式必须在每次提交时自动复核。
+# ===========================================================================
+  sanitize:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake g++ libssl-dev \
+            libmysqlcppconn-dev libhiredis-dev libcurl4-openssl-dev \
+            nlohmann-json3-dev
+
+      - name: 配置(Debug + ASan + UBSan)
+        run: |
+          cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: 编译(只编引擎相关的目标)
+        # 为什么只编 ac_test / waf_eval,不编 unit_test:
+        #
+        # sanitizer + Debug 下单个编译单元的内存占用会翻几倍 —— 本地实测
+        # http_server.cpp 那一类大 TU 的 cc1plus 峰值 RSS 约 2.4 GB。
+        # GitHub 的 runner 是 2 核 7 GB,把整个 unit_test 链上的十几个 TU
+        # 都编一遍既慢(本地 20 核都要十几分钟)又逼近内存上限。
+        #
+        # 而 ac_test / waf_eval 只依赖 engine + log,几秒就能编完,
+        # 也正好覆盖文档里声称的那句"ASan + UBSan 跑完整一轮对拍"。
+        run: |
+          cmake --build build-asan -j2 --target ac_test waf_eval
+
+      - name: AC 自动机对拍(ASan + UBSan + 泄漏检测)
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ./build-asan/ac_test 20000
+
+      - name: WAF 评测(引擎 + 策略全走一遍 sanitizer)
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          ./build-asan/waf_eval \
+            --rules rules/attack_patterns.txt \
+            --policy rules/policy.conf \
+            --corpus tools/waf_eval/corpus \
+            --repeat 1

@@ -134,6 +134,9 @@ struct AiConfig {
     //
     // 设 0 或 1 = 不聚合(每个 IP 各发一条,回到旧行为)。
     int    merge_threshold_ips = 3;
+    // 跨轮次去重窗口(小时):同一个 IP 的同类威胁在这个窗口内再次判定为攻击时,
+    // 合并进已有告警而不是新建。0 = 不去重(每次新建)。
+    int    dedup_window_hours = 24;
 };
 
 struct Config {

@@ -308,6 +308,14 @@ fi
 # ---------------------------------------------------------------------------
 sec "9. AI 分析层"
 # ---------------------------------------------------------------------------
+# 先自己造一条"可分析"的记录。
+#
+# 为什么:这一组原来依赖"线上恰好有待分析的记录"。如果刚跑过一轮分析把队列
+# 清空了,某些用例就会跳过一次(实测出现过 53 通过 / 1 跳过)。
+# 自检不该依赖环境状态 —— 自己造数据,结果才可重复。
+# 用 /alibabacloud.yaml:它命中 CRED-001(BLOCK 级、非策略性),一定能进队列。
+curl -s -o /dev/null --max-time 5 "$BASE/alibabacloud.yaml" 2>/dev/null
+
 an=$(body "$BASE/api/analyze/stats" -H "Authorization: Bearer $ATOK")
 en=$(echo "$an" | jget enabled)
 pv=$(echo "$an" | jget provider)

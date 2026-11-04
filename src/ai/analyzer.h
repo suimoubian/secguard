@@ -38,6 +38,9 @@ struct AnalyzerStats {
     // 被聚合成"分布式扫描"的个体告警数(这些没有单独写库)。
     // 和 alerts_created 一起看:合并数远大于创建数,说明来的主要是分布式扫描。
     long long alerts_merged = 0;
+    // 合并进已有告警的次数(同一 IP + 同类威胁在去重窗口内再次被判为攻击)。
+    // 这个数越大,说明告警去重起作用越多、列表越干净。
+    long long alerts_deduped = 0;
     long long notified = 0;
     long long notify_failed = 0;
     long long skipped_low_confidence = 0;
