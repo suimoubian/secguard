@@ -31,7 +31,8 @@ check_prereq() {
   试: sudo systemctl start docker && sudo usermod -aG docker \$USER (然后重新登录)"
     [ -f .env ] || die "缺 .env。先执行:
   cp .env.example .env
-  然后改掉里面的 MYSQL_ROOT_PASSWORD / SECGUARD_DB_PASS / SECGUARD_JWT_SECRET"
+  然后改掉里面的 SECGUARD_DB_PASS / SECGUARD_JWT_SECRET
+  (MYSQL_ROOT_PASSWORD 单独放 .env.db,不进 app 容器)"
 
     # .env 里的占位值必须被改掉,否则等于没设密码
     if grep -q 'change-me' .env; then

@@ -28,6 +28,9 @@ __pycache__/
 # ---- 本机密文:绝不提交 ----
 # 数据库口令、LLM API Key 一律走环境变量或本地配置文件
 .env
+# 数据库 root 口令单独一个文件:它只传给 mysql 容器,不进 app 容器
+# (原因见 docker-compose.yml 的 mysql 段注释)
+.env.db
 *.env
 config.local.*
 secrets.*

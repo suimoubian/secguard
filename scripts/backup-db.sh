@@ -33,8 +33,19 @@ KEEP_DAYS="${KEEP_DAYS:-7}"
 [ -f .env ] || die "当前目录没有 .env"
 DB_NAME=$(grep '^SECGUARD_DB_NAME=' .env | cut -d= -f2-)
 DB_NAME=${DB_NAME:-secguard}
-ROOT_PW=$(grep '^MYSQL_ROOT_PASSWORD=' .env | cut -d= -f2-)
-[ -n "$ROOT_PW" ] || die ".env 里没有 MYSQL_ROOT_PASSWORD"
+
+# root 口令在 .env.db 里(2026-11-05 拆出去的)。
+# 原因:app 容器用 env_file: .env,如果 root 口令留在 .env,它会进 app 容器的
+# 环境变量 —— 万一 app 出 RCE,攻击者就能从"应用失守"升级到"数据库全权失守"。
+# 兼容:老部署没有 .env.db 时回退到 .env。
+ROOT_PW=""
+if [ -f .env.db ]; then
+    ROOT_PW=$(grep '^MYSQL_ROOT_PASSWORD=' .env.db | cut -d= -f2-)
+fi
+if [ -z "$ROOT_PW" ]; then
+    ROOT_PW=$(grep '^MYSQL_ROOT_PASSWORD=' .env | cut -d= -f2-)
+fi
+[ -n "$ROOT_PW" ] || die "找不到 MYSQL_ROOT_PASSWORD(应在 .env.db,老部署在 .env)"
 
 # 容器里的 mysql 客户端
 myexec() { sudo docker exec secguard-mysql "$@"; }

@@ -20,8 +20,25 @@ services:
     image: mysql:8.0
     container_name: secguard-mysql
     restart: unless-stopped
+    # -------------------------------------------------------------------------
+    # 只把"数据库自己的口令"传给 mysql 容器,走独立的 .env.db。
+    #
+    # 为什么要拆(2026-11-05):
+    #   app 服务用 env_file: .env 之后,.env 里**所有**变量都会进 app 容器,
+    #   包括 MYSQL_ROOT_PASSWORD。而 app 根本不需要 DB 的 root 口令 ——
+    #   它只用 SECGUARD_DB_PASS(一个只有 DML 权限的账号)。
+    #
+    #   真实风险不是"别人 exec 进容器"(那时已经晚了),而是:
+    #   **万一将来 app 出现一个 RCE 漏洞,攻击者在容器里能直接读到 root 口令,
+    #   从"应用层失守"升级成"数据库全权失守"。** 拆开之后他能拿到的只是
+    #   DML 账号,拿不到 root。
+    #
+    #   MYSQL_DATABASE / MYSQL_USER / MYSQL_PASSWORD 仍然从 .env 代入 ——
+    #   这三个的值本来就来自 SECGUARD_DB_*,app 也需要它们,不算新暴露面。
+    # -------------------------------------------------------------------------
+    env_file:
+      - .env.db
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?必须在 .env 里设置 MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${SECGUARD_DB_NAME:-secguard}
       MYSQL_USER: ${SECGUARD_DB_USER:-secguard}
       MYSQL_PASSWORD: ${SECGUARD_DB_PASS:?必须在 .env 里设置 SECGUARD_DB_PASS}
@@ -121,9 +138,10 @@ services:
     #   TRUST_PROXY=1。这些值在宿主机上是不对的,必须由 compose 定。
     # environment 的优先级高于 env_file,所以覆盖关系是正确的。
     #
-    # 代价:.env 里的 MYSQL_ROOT_PASSWORD 也会进 app 容器的环境变量。
-    # app 不读它,但能 exec 进容器的人能看到。考虑到这台机器只有自己能登,
-    # 这个代价可以接受;真要严格隔离,应该拆成 app.env / db.env 两个文件。
+    # 关于"哪些变量该留在 .env":
+    #   app 需要的是 SECGUARD_* 这些。数据库的 root 口令**不该**留在这里 ——
+    #   它已经拆到 .env.db,只传给 mysql 容器(见 mysql 段注释)。
+    #   这样即使 app 出 RCE,攻击者在容器里也拿不到 root 口令。
     # -------------------------------------------------------------------------
     env_file:
       - .env
