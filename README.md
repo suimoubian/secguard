@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/suimoubian/secguard/actions/workflows/ci.yml/badge.svg)](https://github.com/suimoubian/secguard/actions/workflows/ci.yml)
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-blue)
-![Tests](https://img.shields.io/badge/自检-54%20项-2ea44f)
+![Tests](https://img.shields.io/badge/自检-56%20项-2ea44f)
 
 用 C++ 实现的高性能安全审计引擎:手写 **AC 自动机(Aho-Corasick)** 做多模式攻击特征匹配,
 配合 Web 接入层、多级防护与 **LLM 离线分析**,构成完整的分层流量审计告警系统。
@@ -49,7 +49,7 @@
 | W11 | **规则分级 BLOCK/ALERT** + 策略文件(把"看见"和"拦下"分开) | ✅ **完成** |
 | W12 | **真实流量驱动的三项改进**:规则补全 18 条、审计降采样、告警聚合 | ✅ **完成** |
 
-规模:**70 余个文件、约 8100 行源码**,自检 54 项全过,**已上线**(见 [docs/部署记录.md](docs/部署记录.md))。
+规模:**70 余个文件、约 8100 行源码**,自检 56 项全过,**已上线**(见 [docs/部署记录.md](docs/部署记录.md))。
 
 ### W10 / W11:从"能拦"到"拦得准"
 
@@ -275,6 +275,8 @@ cmake --build build -j$(nproc)
 | `scripts/offline-restore.sh` | 从本地缓存恢复 Docker 镜像,完全不联网(镜像被 prune 后救急) |
 | `scripts/demo-attack.sh` | 一键演示:9 类攻击,输出带预期结果 |
 | `scripts/backup-db.sh` | 数据库备份 / 列备份 / 校验 / **恢复测试**(真恢复到一个临时库比对行数) |
+| `scripts/check-config-sync.sh` | 检查 .env / .env.example / 代码三处清单是否一致(CI 里跑) |
+| `scripts/show-config.sh` | 从运行中的容器读实际生效的配置(密钥自动打码) |
 | `scripts/watch-real-traffic.sh` | 看有没有真实攻击打进来(按 IP 汇总并排除自己人) |
 | `scripts/webhook_receiver.py` | 本地告警接收端,用来确认 webhook 真的推出来了 |
 | `bench/run.sh` | 压测(自动绑核,输出对比表) |
@@ -433,6 +435,7 @@ sudo mysql < db/schema.sql
 | [docs/怎么测试.md](docs/怎么测试.md) | **三层测试法**:60 秒浏览器冒烟、3 分钟自检、逐项手工验证(含 14 组命令和期望结果) |
 | [docs/演示素材.md](docs/演示素材.md) | 线上实录的攻击输出、审计流水、三条真实 AI 告警原文,以及那个"看起来像漏报的 200"怎么解释 |
 | [docs/项目现状.md](docs/项目现状.md) | 做到哪了、还剩什么、**两周后怎么重新跑起来** |
+| [docs/配置清单.md](docs/配置清单.md) | **配置到底在哪**:五层配置地图、env_file 机制、常用操作对照、敏感文件权限 |
 | [docs/数据持久化审查.md](docs/数据持久化审查.md) | 数据链路专项审查:队列/落库/停机/清理/备份,5 个问题与修复 |
 | [docs/部署记录.md](docs/部署记录.md) | 第一次上线的实际过程、五个问题和解法、和清单的差异 |
 | [docs/上线清单.md](docs/上线清单.md) | 从买机器到浏览器打通的逐步清单 |

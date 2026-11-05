@@ -458,6 +458,36 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+sec "13. 配置一致性"
+# ---------------------------------------------------------------------------
+# 配置要出现在三处才真正生效:.env / .env.example / 代码读取。
+# 对不上时在 .env 里改了也不生效 —— 这个坑踩过三次
+# (聚合门槛、保留天数、以及 20 多个参数),所以单独作为一组自检。
+if [ -x ./scripts/check-config-sync.sh ]; then
+    cs_out=$(./scripts/check-config-sync.sh 2>&1)
+    if [ $? -eq 0 ]; then
+        ok "配置三处清单一致"
+    else
+        bad "配置三处清单" "$(echo "$cs_out" | grep -E '✗' | head -2 | tr '\n' ' ')"
+    fi
+else
+    skip "配置一致性" "scripts/check-config-sync.sh 不存在"
+fi
+
+# 确认容器真的通过 env_file 收到了 .env 里的变量。
+#
+# 判据不能用"某个固定变量在不在" —— 它可能本来就没写进 .env。
+# 正确判据是:**容器里的 SECGUARD_* 数量应当 >= .env 里的 SECGUARD_* 数量**。
+# 这直接检验 env_file 的作用:凡是 .env 里设的,容器都该收到。
+env_cnt=$(grep -cE '^SECGUARD_[A-Z_]+=' .env 2>/dev/null || echo 0)
+cont_cnt=$(sudo docker exec secguard-app printenv 2>/dev/null | grep -c '^SECGUARD_' || echo 0)
+if [ "${cont_cnt:-0}" -ge "${env_cnt:-0}" ] && [ "${env_cnt:-0}" -gt 0 ]; then
+    ok "env_file 生效(.env 里 $env_cnt 项,容器收到 $cont_cnt 项)"
+else
+    bad "env_file 传递" ".env 有 $env_cnt 项,容器只收到 $cont_cnt 项"
+fi
+
+# ---------------------------------------------------------------------------
 echo
 echo "=================================================================="
 printf ' 结果: \033[32m通过 %d\033[0m   \033[31m失败 %d\033[0m   跳过 %d\n' "$PASS" "$FAIL" "$SKIP"

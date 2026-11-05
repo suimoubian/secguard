@@ -99,6 +99,34 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # -------------------------------------------------------------------------
+    # env_file:把 .env 里**所有**变量整体传进容器。
+    #
+    # 为什么要有这个(2026-11-05 查出来的):
+    #   原来的写法是逐条列在 environment: 下面。代码读 63 个环境变量,
+    #   而这里只显式传了 41 个 —— **剩下 22 个在容器里永远拿不到,
+    #   只能吃代码默认值**。在 .env 里改它们等于没改。
+    #
+    #   这个坑已经踩过三次了:
+    #     · SECGUARD_AI_MERGE_IPS   聚合门槛调不动
+    #     · SECGUARD_AUDIT_RETENTION_DAYS 保留天数调不动(结果删了最有价值的攻击证据)
+    #     · SECGUARD_THREADS / TOKEN_TTL / REDIS_PASS / AUDIT_ASYNC /
+    #       REPLAY_REQUIRE / LOGIN_FAIL_LIMIT ... 等 20 多个同样调不动
+    #
+    #   逐条维护一张清单必然漏。改成 env_file 之后,.env 里新加的任何开关
+    #   自动生效,不需要再改这里。
+    #
+    # 下面的 environment: 仍然保留,因为它要负责**容器内部才有意义的覆盖**:
+    #   DB_HOST=mysql / REDIS_HOST=redis(服务名)、BIND=0.0.0.0、PORT=8080、
+    #   TRUST_PROXY=1。这些值在宿主机上是不对的,必须由 compose 定。
+    # environment 的优先级高于 env_file,所以覆盖关系是正确的。
+    #
+    # 代价:.env 里的 MYSQL_ROOT_PASSWORD 也会进 app 容器的环境变量。
+    # app 不读它,但能 exec 进容器的人能看到。考虑到这台机器只有自己能登,
+    # 这个代价可以接受;真要严格隔离,应该拆成 app.env / db.env 两个文件。
+    # -------------------------------------------------------------------------
+    env_file:
+      - .env
     environment:
       SECGUARD_DB_HOST: mysql
       SECGUARD_DB_PORT: "3306"

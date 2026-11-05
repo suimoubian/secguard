@@ -85,6 +85,12 @@ jobs:
             --max-miss 0.10 --max-fp 0.25
           echo "门禁通过"
 
+      - name: 配置三处一致性(.env / .env.example / 代码)
+        # 背景:同一个配置要出现在三个地方才真正生效。这个坑踩过三次 ——
+        # SECGUARD_AI_MERGE_IPS、SECGUARD_AUDIT_RETENTION_DAYS(把攻击证据删了)、
+        # 以及 20 多个"设了但不生效"的参数。加这一步之后,漏一个变量会直接红。
+        run: ./scripts/check-config-sync.sh
+
       - name: 规则库体检
         # 抓两类"不报错、只静默改变行为"的问题:
         #   1. 行首是 # 但带 TAB 的规则(会被当注释整行丢掉,曾经有过一条)
