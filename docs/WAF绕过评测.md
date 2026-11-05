@@ -430,17 +430,17 @@ P2 在这套语料上代价也是 0,但我没有选它,因为:
 ./scripts/eval-waf.sh
 
 # 换一套处置策略再跑(不降级 / 降 10 条 / 降 12 条,对比见第十节)
-./build-eval/waf_eval --rules rules/attack_patterns.txt \
+./build/waf_eval --rules rules/attack_patterns.txt \
     --policy rules/policy.conf --corpus tools/waf_eval/corpus --repeat 3
 
 # 门禁模式:漏报率 > 10% 或误报率 > 25% 就返回非 0,给 CI 用
 ./scripts/eval-waf.sh --gate
 
 # 只看引擎实际加载的规则(排查 7.2 那种问题)
-./build-eval/waf_eval --rules rules/attack_patterns.txt --dump-rules
+./build/waf_eval --rules rules/attack_patterns.txt --dump-rules
 
 # 单元测试里的归一化规格(38 个断言)
-./build-eval/unit_test
+./build/unit_test
 
 # 端到端:功能 A/B + 吞吐 A/B(需要 docker 那套服务在跑)
 ./bench/ab-normalize.sh func    # 编码载荷 200 -> 403

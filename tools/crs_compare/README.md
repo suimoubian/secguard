@@ -37,8 +37,8 @@ curl -s -o /dev/null -w '%{http_code}\n' 'http://127.0.0.1:8089/?id=1%20or%201=1
 ## 怎么跑对比
 
 ```bash
-# 先保证 build-eval/waf_eval 已经编好
-cmake --build build-eval --target waf_eval
+# 先保证 build/waf_eval 已经编好
+cmake --build build --target waf_eval
 
 python3 tools/crs_compare/compare.py \
     --crs-url http://127.0.0.1:8089 \
