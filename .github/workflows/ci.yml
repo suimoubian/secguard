@@ -89,7 +89,10 @@ jobs:
         # 背景:同一个配置要出现在三个地方才真正生效。这个坑踩过三次 ——
         # SECGUARD_AI_MERGE_IPS、SECGUARD_AUDIT_RETENTION_DAYS(把攻击证据删了)、
         # 以及 20 多个"设了但不生效"的参数。加这一步之后,漏一个变量会直接红。
-        run: ./scripts/check-config-sync.sh
+        # 用 bash 显式调用而不是 ./xxx:
+        # 脚本的可执行位在 git 里是 100755,但 Windows/drvfs 上 chmod 不生效,
+        # 一次疏忽就会让这步以 Permission denied 失败(踩过一次)。
+        run: bash scripts/check-config-sync.sh
 
       - name: 规则库体检
         # 抓两类"不报错、只静默改变行为"的问题:
